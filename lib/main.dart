@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -498,9 +499,17 @@ class _HomePageState extends State<HomePage> {
         title: const Text('Messenger'),
         actions: [
           IconButton(
-            onPressed: () => sb.auth.signOut(),
-            icon: const Icon(Icons.logout),
+            tooltip: 'Profile',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfilePage())),
+            icon: const Icon(Icons.person_outline),
           ),
+          FutureBuilder<Map<String, dynamic>?>(
+            future: sb.from('profiles').select('role').eq('id', sb.auth.currentUser!.id).maybeSingle(),
+            builder: (context, snap) => snap.data?['role'] == 'owner'
+                ? IconButton(tooltip: 'Admin panel', onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const AdminPage())), icon: const Icon(Icons.admin_panel_settings_outlined))
+                : const SizedBox.shrink(),
+          ),
+          IconButton(onPressed: () => sb.auth.signOut(), icon: const Icon(Icons.logout)),
         ],
       ),
       floatingActionButton: FloatingActionButton(
@@ -710,15 +719,8 @@ class _SearchPageState extends State<SearchPage> {
 class ChatPage extends StatefulWidget {
   final String conversationId;
   final String title;
-
-  const ChatPage({
-    super.key,
-    required this.conversationId,
-    required this.title,
-  });
-
-  @override
-  State<ChatPage> createState() => _ChatPageState();
+  const ChatPage({super.key, required this.conversationId, required this.title});
+  @override State<ChatPage> createState() => _ChatPageState();
 }
 
 class _ChatPageState extends State<ChatPage> {
@@ -728,112 +730,101 @@ class _ChatPageState extends State<ChatPage> {
   bool _sending = false;
   DateTime? _otherLastRead;
   int _lastMessageCount = -1;
+  Map<String, dynamic>? _replyingTo;
+  Map<String, dynamic>? _editing;
 
-  @override
-  void initState() {
+  @override void initState() {
     super.initState();
-    _messages = sb.from('messages').stream(primaryKey: ['id']).eq('conversation_id', widget.conversationId).order('created_at');
-    _markRead();
-    _loadReceipt();
+    _messages = sb.from('messages').stream(primaryKey: ['id']).eq('conversation_id', widget.conversationId).order('created_at', ascending: true);
+    _markRead(); _loadReceipt();
   }
+  @override void dispose() { _input.dispose(); _scroll.dispose(); super.dispose(); }
 
   Future<void> _markRead() async {
-    final me = sb.auth.currentUser?.id;
-    if (me == null) return;
-    await sb.from('conversation_members').update({'last_read_at': DateTime.now().toUtc().toIso8601String()}).eq('conversation_id', widget.conversationId).eq('user_id', me);
+    final me=sb.auth.currentUser?.id; if(me==null)return;
+    await sb.from('conversation_members').update({'last_read_at':DateTime.now().toUtc().toIso8601String()}).eq('conversation_id',widget.conversationId).eq('user_id',me);
   }
-
   Future<void> _loadReceipt() async {
-    final me = sb.auth.currentUser?.id;
-    if (me == null) return;
-    final rows = await sb.from('conversation_members').select('user_id,last_read_at').eq('conversation_id', widget.conversationId).neq('user_id', me);
-    if (rows.isNotEmpty && mounted) {
-      final raw = rows.first['last_read_at'] as String?;
-      final next = raw == null ? null : DateTime.tryParse(raw);
-      if (next != _otherLastRead) setState(() => _otherLastRead = next);
-    }
+    final me=sb.auth.currentUser?.id; if(me==null)return;
+    final rows=await sb.from('conversation_members').select('user_id,last_read_at').eq('conversation_id',widget.conversationId).neq('user_id',me);
+    if(rows.isNotEmpty&&mounted){final raw=rows.first['last_read_at'] as String?; setState(()=>_otherLastRead=raw==null?null:DateTime.tryParse(raw));}
   }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) _scroll.animateTo(_scroll.position.maxScrollExtent, duration: const Duration(milliseconds: 220), curve: Curves.easeOut);
-    });
-  }
-
-  @override
-  void dispose() { _input.dispose(); _scroll.dispose(); super.dispose(); }
+  void _scrollToBottom(){WidgetsBinding.instance.addPostFrameCallback((_){if(_scroll.hasClients)_scroll.animateTo(_scroll.position.maxScrollExtent,duration:const Duration(milliseconds:220),curve:Curves.easeOut);});}
+  String _stamp(DateTime dt){final l=dt.toLocal(),n=DateTime.now();if(DateUtils.isSameDay(l,n))return DateFormat('HH:mm').format(l);if(DateUtils.isSameDay(l,n.subtract(const Duration(days:1))))return 'Yesterday ${DateFormat('HH:mm').format(l)}';return DateFormat('MMM d, HH:mm').format(l);}
 
   Future<void> _send() async {
-    if (_sending) return;
-    final text = _input.text.trim();
-    final user = sb.auth.currentUser;
-    if (text.isEmpty || user == null) return;
-    setState(() => _sending = true);
-    try {
-      await sb.from('messages').insert({'conversation_id': widget.conversationId, 'sender_id': user.id, 'body': text});
-      _input.clear();
-      _scrollToBottom();
-    } on PostgrestException catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
-    } finally { if (mounted) setState(() => _sending = false); }
+    if(_sending)return; final text=_input.text.trim(); final u=sb.auth.currentUser; if(text.isEmpty||u==null)return;
+    setState(()=>_sending=true);
+    try{
+      if(_editing!=null){await sb.from('messages').update({'body':text,'edited_at':DateTime.now().toUtc().toIso8601String()}).eq('id',_editing!['id']);}
+      else{await sb.from('messages').insert({'conversation_id':widget.conversationId,'sender_id':u.id,'body':text,'reply_to':_replyingTo?['id']});}
+      _input.clear(); if(mounted)setState((){_editing=null;_replyingTo=null;}); _scrollToBottom();
+    }on PostgrestException catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.message)));}
+    finally{if(mounted)setState(()=>_sending=false);}
   }
 
-  String _stamp(DateTime dt) {
-    final local = dt.toLocal();
-    final now = DateTime.now();
-    if (DateUtils.isSameDay(local, now)) return DateFormat('HH:mm').format(local);
-    if (DateUtils.isSameDay(local, now.subtract(const Duration(days: 1)))) return 'Yesterday ${DateFormat('HH:mm').format(local)}';
-    return DateFormat('MMM d, HH:mm').format(local);
+  Future<void> _deleteMessage(Map<String,dynamic> m) async {
+    await sb.from('messages').update({'body':'Message deleted','deleted_at':DateTime.now().toUtc().toIso8601String(),'edited_at':DateTime.now().toUtc().toIso8601String()}).eq('id',m['id']);
+  }
+  Future<void> _report(Map<String,dynamic> m) async {
+    String reason='Harassment'; final comment=TextEditingController();
+    final ok=await showDialog<bool>(context:context,builder:(ctx)=>StatefulBuilder(builder:(ctx,setD)=>AlertDialog(
+      title:const Text('Report this message?'),
+      content:SingleChildScrollView(child:Column(mainAxisSize:MainAxisSize.min,crossAxisAlignment:CrossAxisAlignment.start,children:[
+        const Text('To help moderators review your report, the 5 messages immediately before the reported message will also be included as context. Only this context and the reported message will be shared with moderators.'),
+        const SizedBox(height:16),DropdownButtonFormField<String>(initialValue:reason,items:const ['Harassment','Spam','Hate speech','Threats','Scam','Other'].map((x)=>DropdownMenuItem(value:x,child:Text(x))).toList(),onChanged:(v)=>setD(()=>reason=v??reason),decoration:const InputDecoration(labelText:'Reason')),
+        const SizedBox(height:12),TextField(controller:comment,maxLength:1000,maxLines:3,decoration:const InputDecoration(labelText:'Additional comment (optional)',border:OutlineInputBorder())),
+      ])),actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:const Text('Submit report'))],
+    )));
+    if(ok==true){try{await sb.rpc('report_message',params:{'target_message':m['id'],'report_reason':reason,'report_comment':comment.text.trim()});if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Report sent.')));}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Report failed: $e')));}}
+    comment.dispose();
+  }
+  void _menu(Map<String,dynamic> m){
+    final mine=m['sender_id']==sb.auth.currentUser?.id; final deleted=m['deleted_at']!=null;
+    showModalBottomSheet(context:context,builder:(ctx)=>SafeArea(child:Wrap(children:[
+      if(!deleted)ListTile(leading:const Icon(Icons.reply),title:const Text('Reply'),onTap:(){Navigator.pop(ctx);setState(()=>_replyingTo=m);}),
+      if(!deleted)ListTile(leading:const Icon(Icons.copy),title:const Text('Copy'),onTap:(){Clipboard.setData(ClipboardData(text:(m['body']??'').toString()));Navigator.pop(ctx);}),
+      if(mine&&!deleted)ListTile(leading:const Icon(Icons.edit),title:const Text('Edit'),onTap:(){Navigator.pop(ctx);setState(()=>_editing=m);_input.text=(m['body']??'').toString();}),
+      if(mine&&!deleted)ListTile(leading:const Icon(Icons.delete_outline),title:const Text('Delete'),onTap:(){Navigator.pop(ctx);_deleteMessage(m);}),
+      if(!mine&&!deleted)ListTile(leading:const Icon(Icons.flag_outlined),title:const Text('Report'),onTap:(){Navigator.pop(ctx);_report(m);}),
+    ])));
   }
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: Text(widget.title)),
-    body: Column(children: [
-      Expanded(child: StreamBuilder<List<Map<String, dynamic>>>(
-        stream: _messages,
-        builder: (context, snapshot) {
-          if (snapshot.hasError) return Center(child: Text('Chat error: ${snapshot.error}'));
-          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
-          final messages = snapshot.data!;
-          if (_lastMessageCount != messages.length) {
-            _lastMessageCount = messages.length;
-            _markRead();
-            _loadReceipt();
-            _scrollToBottom();
-          }
-          return ListView.builder(
-            controller: _scroll, padding: const EdgeInsets.all(12), itemCount: messages.length,
-            itemBuilder: (context, index) {
-              final message = messages[index];
-              final mine = message['sender_id'] == sb.auth.currentUser?.id;
-              final created = DateTime.tryParse((message['created_at'] ?? '').toString()) ?? DateTime.now();
-              final delivered = mine && _otherLastRead != null && !_otherLastRead!.isBefore(created);
-              return Align(
-                alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-                child: Container(
-                  margin: const EdgeInsets.symmetric(vertical: 3), padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                  constraints: BoxConstraints(maxWidth: MediaQuery.sizeOf(context).width * 0.80),
-                  decoration: BoxDecoration(color: mine ? Theme.of(context).colorScheme.primaryContainer : Theme.of(context).colorScheme.surfaceContainerHighest, borderRadius: BorderRadius.circular(18)),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                    Align(alignment: Alignment.centerLeft, child: Text((message['body'] ?? '').toString())),
-                    const SizedBox(height: 3),
-                    Text('${_stamp(created)}${mine ? (delivered ? '  • Delivered' : '  • Sent') : ''}', style: Theme.of(context).textTheme.labelSmall),
-                  ]),
-                ),
-              );
-            },
-          );
-        },
-      )),
-      SafeArea(top: false, child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-        child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-          Expanded(child: TextField(controller: _input, minLines: 1, maxLines: 4, onSubmitted: (_) => _send(), decoration: const InputDecoration(hintText: 'Message...', border: OutlineInputBorder()))),
-          const SizedBox(width: 8),
-          IconButton.filled(onPressed: _sending ? null : _send, icon: const Icon(Icons.send)),
-        ]),
-      )),
-    ]),
-  );
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:Text(widget.title)),body:Column(children:[
+    Expanded(child:StreamBuilder<List<Map<String,dynamic>>>(stream:_messages,builder:(context,snapshot){
+      if(snapshot.hasError)return Center(child:Text('Chat error: ${snapshot.error}'));if(!snapshot.hasData)return const Center(child:CircularProgressIndicator());
+      final messages=snapshot.data!;
+      if(_lastMessageCount!=messages.length){_lastMessageCount=messages.length;_markRead();_loadReceipt();_scrollToBottom();}
+      final byId={for(final m in messages)m['id'].toString():m};
+      return ListView.builder(controller:_scroll,padding:const EdgeInsets.all(12),itemCount:messages.length,itemBuilder:(context,index){
+        final m=messages[index],mine=m['sender_id']==sb.auth.currentUser?.id,deleted=m['deleted_at']!=null;final created=DateTime.tryParse((m['created_at']??'').toString())??DateTime.now();final delivered=mine&&_otherLastRead!=null&&!_otherLastRead!.isBefore(created);final reply=byId[m['reply_to']?.toString()];
+        return Align(alignment:mine?Alignment.centerRight:Alignment.centerLeft,child:GestureDetector(onLongPress:()=>_menu(m),child:Container(margin:const EdgeInsets.symmetric(vertical:3),padding:const EdgeInsets.symmetric(horizontal:14,vertical:9),constraints:BoxConstraints(maxWidth:MediaQuery.sizeOf(context).width*.80),decoration:BoxDecoration(color:mine?Theme.of(context).colorScheme.primaryContainer:Theme.of(context).colorScheme.surfaceContainerHighest,borderRadius:BorderRadius.circular(18)),child:Column(crossAxisAlignment:CrossAxisAlignment.end,children:[
+          if(reply!=null)Container(width:double.infinity,padding:const EdgeInsets.all(7),margin:const EdgeInsets.only(bottom:6),decoration:BoxDecoration(color:Colors.black26,borderRadius:BorderRadius.circular(8)),child:Text(reply['deleted_at']!=null?'Message deleted':(reply['body']??'').toString(),maxLines:2,overflow:TextOverflow.ellipsis)),
+          Align(alignment:Alignment.centerLeft,child:Text(deleted?'Message deleted':(m['body']??'').toString(),style:deleted?const TextStyle(fontStyle:FontStyle.italic):null)),
+          const SizedBox(height:3),Text('${_stamp(created)}${m['edited_at']!=null&&!deleted?'  • edited':''}${mine?'  • ${delivered?'Delivered':'Sent'}':''}',style:Theme.of(context).textTheme.labelSmall),
+        ]))));
+      });
+    })),
+    if(_replyingTo!=null||_editing!=null)Container(width:double.infinity,padding:const EdgeInsets.fromLTRB(14,8,8,4),child:Row(children:[Expanded(child:Text(_editing!=null?'Editing message':'Replying to: ${(_replyingTo?['body']??'').toString()}',maxLines:1,overflow:TextOverflow.ellipsis)),IconButton(onPressed:(){setState((){_replyingTo=null;_editing=null;});_input.clear();},icon:const Icon(Icons.close))])),
+    SafeArea(top:false,child:Padding(padding:const EdgeInsets.fromLTRB(10,6,10,10),child:Row(crossAxisAlignment:CrossAxisAlignment.end,children:[Expanded(child:TextField(controller:_input,minLines:1,maxLines:4,onSubmitted:(_)=>_send(),decoration:const InputDecoration(hintText:'Message...',border:OutlineInputBorder()))),const SizedBox(width:8),IconButton.filled(onPressed:_sending?null:_send,icon:const Icon(Icons.send))]))),
+  ]));
+}
+
+class ProfilePage extends StatefulWidget { const ProfilePage({super.key}); @override State<ProfilePage> createState()=>_ProfilePageState(); }
+class _ProfilePageState extends State<ProfilePage>{
+  final display=TextEditingController(),bio=TextEditingController(),avatar=TextEditingController(); Map<String,dynamic>? p; bool busy=true;
+  @override void initState(){super.initState();_load();} @override void dispose(){display.dispose();bio.dispose();avatar.dispose();super.dispose();}
+  Future<void> _load()async{final x=await sb.from('profiles').select('username,display_name,bio,avatar_url,role,verified').eq('id',sb.auth.currentUser!.id).single();if(mounted)setState((){p=x;display.text=(x['display_name']??'').toString();bio.text=(x['bio']??'').toString();avatar.text=(x['avatar_url']??'').toString();busy=false;});}
+  Future<void> _save()async{await sb.from('profiles').update({'display_name':display.text.trim(),'bio':bio.text.trim(),'avatar_url':avatar.text.trim().isEmpty?null:avatar.text.trim(),'updated_at':DateTime.now().toUtc().toIso8601String()}).eq('id',sb.auth.currentUser!.id);if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Profile saved.')));await _load();}
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Profile')),body:busy?const Center(child:CircularProgressIndicator()):ListView(padding:const EdgeInsets.all(20),children:[Center(child:CircleAvatar(radius:42,child:Text((p?['username']??'?').toString().substring(0,1).toUpperCase()))),const SizedBox(height:12),Center(child:Wrap(crossAxisAlignment:WrapCrossAlignment.center,children:[Text('@${p?['username']}',style:Theme.of(context).textTheme.titleLarge),if(p?['verified']==true)const Padding(padding:EdgeInsets.only(left:5),child:Icon(Icons.verified,color:Colors.lightBlueAccent)),if(p?['role']=='owner')const Padding(padding:EdgeInsets.only(left:8),child:Text('OWNER',style:TextStyle(fontWeight:FontWeight.bold)))])),const SizedBox(height:22),TextField(controller:display,decoration:const InputDecoration(labelText:'Display name',border:OutlineInputBorder())),const SizedBox(height:12),TextField(controller:bio,maxLength:160,maxLines:3,decoration:const InputDecoration(labelText:'Bio',border:OutlineInputBorder())),const SizedBox(height:12),TextField(controller:avatar,decoration:const InputDecoration(labelText:'Avatar URL (placeholder)',border:OutlineInputBorder())),const SizedBox(height:16),FilledButton(onPressed:_save,child:const Text('Save profile'))]));
+}
+
+class AdminPage extends StatefulWidget { const AdminPage({super.key}); @override State<AdminPage> createState()=>_AdminPageState(); }
+class _AdminPageState extends State<AdminPage>{
+  List<Map<String,dynamic>> users=[],reports=[]; bool loading=true;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load()async{try{final u=await sb.from('profiles').select('id,username,display_name,role,verified,created_at').order('created_at',ascending:false);final r=await sb.from('message_reports').select().order('created_at',ascending:false);if(mounted)setState((){users=List<Map<String,dynamic>>.from(u);reports=List<Map<String,dynamic>>.from(r);loading=false;});}catch(e){if(mounted){setState(()=>loading=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Admin error: $e')));}}}
+  Future<void> _verify(Map<String,dynamic> u)async{await sb.rpc('set_user_verified',params:{'target_user':u['id'],'new_value':u['verified']!=true});await _load();}
+  Future<void> _status(Map<String,dynamic> r,String status)async{await sb.from('message_reports').update({'status':status}).eq('id',r['id']);await _load();}
+  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Admin Panel')),body:loading?const Center(child:CircularProgressIndicator()):DefaultTabController(length:2,child:Column(children:[const TabBar(tabs:[Tab(text:'Reports'),Tab(text:'Users')]),Expanded(child:TabBarView(children:[ListView.builder(itemCount:reports.length,itemBuilder:(c,i){final r=reports[i];final ctx=(r['context'] as List?)??[];return ExpansionTile(title:Text('${r['reason']} • ${r['status']}'),subtitle:Text((r['reported_body']??'').toString(),maxLines:2,overflow:TextOverflow.ellipsis),children:[Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Context (up to 5 previous messages)',style:TextStyle(fontWeight:FontWeight.bold)),for(final x in ctx)Padding(padding:const EdgeInsets.symmetric(vertical:3),child:Text('• ${(x as Map)['body']}')),const Divider(),const Text('Reported message',style:TextStyle(fontWeight:FontWeight.bold)),Text((r['reported_body']??'').toString()),if((r['comment']??'').toString().isNotEmpty)...[const SizedBox(height:8),Text('Reporter comment: ${r['comment']}')],const SizedBox(height:10),Wrap(spacing:8,children:[OutlinedButton(onPressed:()=>_status(r,'dismissed'),child:const Text('Dismiss')),FilledButton(onPressed:()=>_status(r,'resolved'),child:const Text('Resolve'))])]))]);}),ListView.builder(itemCount:users.length,itemBuilder:(c,i){final u=users[i];return ListTile(title:Row(children:[Flexible(child:Text('@${u['username']}')),if(u['verified']==true)const Padding(padding:EdgeInsets.only(left:5),child:Icon(Icons.verified,size:18,color:Colors.lightBlueAccent)),if(u['role']=='owner')const Padding(padding:EdgeInsets.only(left:7),child:Text('OWNER',style:TextStyle(fontSize:10,fontWeight:FontWeight.bold)))]),subtitle:Text((u['display_name']??'').toString()),trailing:u['role']=='owner'?null:TextButton(onPressed:()=>_verify(u),child:Text(u['verified']==true?'Unverify':'Verify')));})]))])));
 }
