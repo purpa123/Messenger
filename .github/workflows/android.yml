@@ -1,0 +1,37 @@
+name: Build Android APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.6"
+          channel: stable
+          cache: true
+      - name: Create Android platform files if missing
+        run: |
+          if [ ! -d android ]; then flutter create --project-name=purpa_messenger --org=com.purpa --platforms=android .; fi
+      - name: Configure Android app
+        run: |
+          rm -f README.md test/widget_test.dart
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          path = Path('android/app/src/main/AndroidManifest.xml')
+          text = path.read_text()
+          if 'android.permission.INTERNET' not in text:
+              text = text.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
+          text = text.replace('android:label="purpa_messenger"', 'android:label="Messenger"')
+          path.write_text(text)
+          PYCODE
+      - run: flutter pub get
+      - run: flutter analyze --no-fatal-infos
+      - run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: messenger-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
