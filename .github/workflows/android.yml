@@ -41,7 +41,19 @@ jobs:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           test -n "$KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
-          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/messenger-release.jks
+          python3 - <<'PYCODE'
+          import os, base64, binascii
+          from pathlib import Path
+          value = ''.join(os.environ['KEYSTORE_BASE64'].split())
+          try:
+              data = base64.b64decode(value, validate=True)
+          except (binascii.Error, ValueError):
+              raise SystemExit('KEYSTORE_BASE64 contains invalid Base64 data. Paste the complete encoded keystore only.')
+          if not data:
+              raise SystemExit('Decoded keystore is empty.')
+          Path('android/app/messenger-release.jks').write_bytes(data)
+          print('Keystore restored: {} bytes'.format(len(data)))
+          PYCODE
 
       - name: Configure release signing
         env:
