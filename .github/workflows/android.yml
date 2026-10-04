@@ -70,6 +70,18 @@ jobs:
               p.write_text(s)
           PY
 
+      - name: Validate permanent signing key before build
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          keytool -list -keystore android/app/messenger-release.jks -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS"
+          keytool -certreq -keystore android/app/messenger-release.jks -storepass:env KEYSTORE_PASSWORD -keypass:env KEY_PASSWORD -alias "$KEY_ALIAS" -file "$RUNNER_TEMP/signing-check.csr"
+          keytool -exportcert -keystore android/app/messenger-release.jks -storepass:env KEYSTORE_PASSWORD -alias "$KEY_ALIAS" -file "$RUNNER_TEMP/signing-cert.der"
+          ACTUAL=$(sha256sum "$RUNNER_TEMP/signing-cert.der" | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
+          test "$ACTUAL" = "$EXPECTED_CERT_SHA256" || { echo "Keystore certificate does not match expected fingerprint"; exit 1; }
+
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
 
