@@ -1,13 +1,130 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = bool.fromEnvironment('DEV_BUILD', defaultValue: false);
+
+
+final navigatorKey = GlobalKey<NavigatorState>();
+final localNotifications = FlutterLocalNotificationsPlugin();
+
+@pragma('vm:entry-point')
+Future<void> firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp();
+}
+
+Future<void> savePushToken(String? token) async {
+  final me = sb.auth.currentUser?.id;
+  if (me == null || token == null || token.isEmpty) return;
+  try {
+    await sb.from('push_tokens').upsert({
+      'user_id': me,
+      'token': token,
+      'platform': 'android',
+      'updated_at': DateTime.now().toUtc().toIso8601String(),
+    }, onConflict: 'user_id,token');
+  } catch (_) {}
+}
+
+Future<void> openPushConversation(RemoteMessage message) async {
+  final conversationId = message.data['conversation_id'];
+  if (conversationId == null || conversationId.toString().isEmpty) return;
+  final me = sb.auth.currentUser?.id;
+  if (me == null) return;
+  try {
+    final c = await sb.from('conversations')
+        .select('dm_user_low,dm_user_high')
+        .eq('id', conversationId.toString())
+        .maybeSingle();
+    if (c == null) return;
+    final low = c['dm_user_low']?.toString();
+    final high = c['dm_user_high']?.toString();
+    final other = low == me ? high : low;
+    if (other == null) return;
+    final profile = await sb.from('profiles')
+        .select('username,display_name')
+        .eq('id', other)
+        .maybeSingle();
+    final title = (profile?['display_name'] ?? profile?['username'] ?? 'Chat').toString();
+    final ctx = navigatorKey.currentContext;
+    if (ctx != null) {
+      Navigator.of(ctx).push(MaterialPageRoute(builder: (_) => ChatPage(
+        conversationId: conversationId.toString(),
+        otherUserId: other,
+        title: title,
+      )));
+    }
+  } catch (_) {}
+}
+
+Future<void> initPushNotifications() async {
+  FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  const androidInit = AndroidInitializationSettings('@mipmap/ic_launcher');
+  await localNotifications.initialize(
+    const InitializationSettings(android: androidInit),
+    onDidReceiveNotificationResponse: (response) async {
+      final payload = response.payload;
+      if (payload == null || payload.isEmpty) return;
+      try {
+        final data = Map<String, dynamic>.from(jsonDecode(payload));
+        await openPushConversation(RemoteMessage(data: data));
+      } catch (_) {}
+    },
+  );
+
+  const channel = AndroidNotificationChannel(
+    'messages',
+    'Messages',
+    description: 'New Purpa Messenger messages',
+    importance: Importance.high,
+  );
+  await localNotifications
+      .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(channel);
+
+  final messaging = FirebaseMessaging.instance;
+  await messaging.requestPermission(alert: true, badge: true, sound: true);
+  await savePushToken(await messaging.getToken());
+  messaging.onTokenRefresh.listen(savePushToken);
+
+  FirebaseMessaging.onMessage.listen((message) async {
+    final n = message.notification;
+    final title = n?.title ?? message.data['title']?.toString() ?? 'Purpa Messenger';
+    final body = n?.body ?? message.data['body']?.toString() ?? 'New message';
+    await localNotifications.show(
+      message.hashCode,
+      title,
+      body,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'messages',
+          'Messages',
+          channelDescription: 'New Purpa Messenger messages',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+      payload: jsonEncode(message.data),
+    );
+  });
+
+  FirebaseMessaging.onMessageOpenedApp.listen(openPushConversation);
+  final initial = await messaging.getInitialMessage();
+  if (initial != null) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => openPushConversation(initial));
+  }
+}
+
 
 SupabaseClient get sb => Supabase.instance.client;
 
@@ -17,7 +134,9 @@ Future<void> main() async {
     url: supabaseUrl,
     anonKey: supabasePublishableKey,
   );
+  await Firebase.initializeApp();
   runApp(const MessengerApp());
+  await initPushNotifications();
 }
 
 class MessengerApp extends StatelessWidget {
@@ -26,6 +145,7 @@ class MessengerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: navigatorKey,
       debugShowCheckedModeBanner: devBuild,
       title: devBuild ? 'Messenger DEV' : 'Messenger',
       theme: ThemeData(
@@ -51,7 +171,10 @@ class _AuthGateState extends State<AuthGate> {
   @override
   void initState() {
     super.initState();
-    _subscription = sb.auth.onAuthStateChange.listen((_) {
+    _subscription = sb.auth.onAuthStateChange.listen((_) async {
+      if (sb.auth.currentSession != null) {
+        await savePushToken(await FirebaseMessaging.instance.getToken());
+      }
       if (mounted) setState(() {});
     });
   }
@@ -248,6 +371,24 @@ const privacyText = 'Privacy Policy (v0.2.0)\n\nMessenger stores account informa
 const touText = 'Terms of Use (v0.2.0)\n\nKeep your account credentials private. Do not interfere with the service, evade moderation, automate spam, or misuse other users information. Features marked as experimental may change or be unavailable.';
 const rulesText = 'Messenger Rules\n\n1. Respect other users.\n2. No harassment, threats, hate speech, or bullying.\n3. No spam, scams, impersonation, or malicious links.\n4. Do not share another persons private information without permission.\n5. Follow applicable laws and platform rules.';
 
+class VerifyEmailGate extends StatefulWidget {
+  const VerifyEmailGate({super.key});
+  @override State<VerifyEmailGate> createState() => _VerifyEmailGateState();
+}
+class _VerifyEmailGateState extends State<VerifyEmailGate> {
+  bool busy=false; int cooldown=0; Timer? timer;
+  @override void dispose(){timer?.cancel();super.dispose();}
+  Future<void> resend() async {
+    if(cooldown>0)return;
+    setState(()=>busy=true);
+    try{await sb.auth.resend(type: OtpType.signup,email: sb.auth.currentUser!.email!); if(mounted){setState(()=>cooldown=60);timer=Timer.periodic(const Duration(seconds:1),(t){if(!mounted)return;if(cooldown<=1){t.cancel();setState(()=>cooldown=0);}else setState(()=>cooldown--);});}}
+    catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Could not resend: $e')));}
+    finally{if(mounted)setState(()=>busy=false);}
+  }
+  Future<void> check() async {setState(()=>busy=true);try{await sb.auth.refreshSession();if(mounted)setState((){});}finally{if(mounted)setState(()=>busy=false);}}
+  @override Widget build(BuildContext context)=>Scaffold(body:Center(child:Padding(padding:const EdgeInsets.all(28),child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:480),child:Column(mainAxisSize:MainAxisSize.min,children:[const Icon(Icons.mark_email_unread_outlined,size:76),const SizedBox(height:18),Text('Verify your email',style:Theme.of(context).textTheme.headlineMedium),const SizedBox(height:12),Text("You're signed in, but you need to verify your email before you can use Purpa Messenger.\n\nWe sent a verification link to ${sb.auth.currentUser?.email ?? 'your email address'}.",textAlign:TextAlign.center),const SizedBox(height:22),FilledButton(onPressed:busy?null:check,child:const Text("I've verified my email — Check again")),TextButton(onPressed:busy||cooldown>0?null:resend,child:Text(cooldown>0?'Resend available in ${cooldown}s':'Resend verification email')),TextButton(onPressed:busy?null:()=>sb.auth.signOut(),child:const Text('Sign out'))]))))));
+}
+
 class ProfileGate extends StatefulWidget {
   const ProfileGate({super.key});
 
@@ -343,6 +484,8 @@ class _ProfileGateState extends State<ProfileGate> {
       );
     }
 
+    if (sb.auth.currentUser?.emailConfirmedAt == null) return const VerifyEmailGate();
+
     if (_exists) return const HomePage();
 
     return Scaffold(
@@ -394,6 +537,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   List<Map<String, dynamic>> _chats = [];
   bool _loading = true;
+  String _chatFilter = 'all';
   Timer? _heartbeat;
 
   @override
@@ -441,7 +585,7 @@ class _HomePageState extends State<HomePage> {
 
         final membership = await sb
             .from('conversation_members')
-            .select('muted')
+            .select('muted,archived,favorite,marked_unread_at')
             .eq('conversation_id', conversation['id'])
             .eq('user_id', me)
             .maybeSingle();
@@ -449,15 +593,20 @@ class _HomePageState extends State<HomePage> {
         conversation['other_id'] = otherId;
         conversation['profile'] = profile;
         conversation['muted'] = membership?['muted'] == true;
+        conversation['archived'] = membership?['archived'] == true;
+        conversation['favorite'] = membership?['favorite'] == true;
+        conversation['marked_unread_at'] = membership?['marked_unread_at'];
         output.add(conversation);
 
         await sb.from('conversation_members').update({
           'delivered_at': DateTime.now().toUtc().toIso8601String(),
         }).eq('conversation_id', conversation['id']).eq('user_id', me);
       }
-      output.sort((a, b) => (b['last_message_at'] ?? '')
-          .toString()
-          .compareTo((a['last_message_at'] ?? '').toString()));
+      output.sort((a, b) {
+        final fav = (b['favorite'] == true ? 1 : 0) - (a['favorite'] == true ? 1 : 0);
+        if (fav != 0) return fav;
+        return (b['last_message_at'] ?? '').toString().compareTo((a['last_message_at'] ?? '').toString());
+      });
 
       if (mounted) {
         setState(() {
@@ -502,11 +651,30 @@ class _HomePageState extends State<HomePage> {
         ],
       );
     } else {
-      body = ListView.builder(
+      final visibleChats = _chats.where((c) {
+        final unread = (c['unread_count'] as num? ?? 0) > 0 || c['marked_unread_at'] != null;
+        if (_chatFilter == 'unread') return unread && c['archived'] != true;
+        if (_chatFilter == 'archived') return c['archived'] == true;
+        return c['archived'] != true;
+      }).toList();
+      body = Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12,8,12,4),
+          child: SegmentedButton<String>(
+            segments: const [
+              ButtonSegment(value:'all',label:Text('All')),
+              ButtonSegment(value:'unread',label:Text('Unread')),
+              ButtonSegment(value:'archived',label:Text('Archived')),
+            ],
+            selected: {_chatFilter},
+            onSelectionChanged: (v)=>setState(()=>_chatFilter=v.first),
+          ),
+        ),
+        Expanded(child: ListView.builder(
         physics: const AlwaysScrollableScrollPhysics(),
-        itemCount: _chats.length,
+        itemCount: visibleChats.length,
         itemBuilder: (context, index) {
-          final chat = _chats[index];
+          final chat = visibleChats[index];
           final profile = chat['profile'] as Map<String, dynamic>?;
           final username = (profile?['username'] ?? 'Unknown').toString();
           final displayName = (profile?['display_name'] ?? '').toString().trim();
@@ -550,6 +718,25 @@ class _HomePageState extends State<HomePage> {
                     child: Text('${chat['unread_count']}', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
                   )
                 : null,
+            onLongPress: () async {
+              final me = sb.auth.currentUser?.id;
+              if (me == null) return;
+              final action = await showModalBottomSheet<String>(
+                context: context,
+                builder: (ctx) => SafeArea(child: Wrap(children:[
+                  ListTile(leading:Icon(chat['favorite']==true?Icons.star:Icons.star_border),title:Text(chat['favorite']==true?'Remove from favorites':'Add to favorites'),onTap:()=>Navigator.pop(ctx,'favorite')),
+                  ListTile(leading:const Icon(Icons.mark_email_unread_outlined),title:const Text('Mark as unread'),onTap:()=>Navigator.pop(ctx,'unread')),
+                  ListTile(leading:Icon(chat['archived']==true?Icons.unarchive_outlined:Icons.archive_outlined),title:Text(chat['archived']==true?'Unarchive':'Archive'),onTap:()=>Navigator.pop(ctx,'archive')),
+                ])),
+              );
+              if (action == null) return;
+              final patch=<String,dynamic>{};
+              if(action=='favorite') patch['favorite']=chat['favorite']!=true;
+              if(action=='archive') patch['archived']=chat['archived']!=true;
+              if(action=='unread') patch['marked_unread_at']=DateTime.now().toUtc().toIso8601String();
+              await sb.from('conversation_members').update(patch).eq('conversation_id',chat['id']).eq('user_id',me);
+              await _loadChats();
+            },
             onTap: () async {
               await Navigator.push(
                 context,
@@ -565,7 +752,8 @@ class _HomePageState extends State<HomePage> {
             },
           );
         },
-      );
+      )),
+      ]);
     }
 
     return Scaffold(
@@ -589,6 +777,11 @@ class _HomePageState extends State<HomePage> {
             tooltip: 'Profile',
             onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ProfilePage())),
             icon: const Icon(Icons.person_outline),
+          ),
+          IconButton(
+            tooltip: 'Settings',
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsPage())),
+            icon: const Icon(Icons.settings_outlined),
           ),
           FutureBuilder<Map<String, dynamic>?>(
             future: sb.from('profiles').select('role').eq('id', sb.auth.currentUser!.id).maybeSingle(),
@@ -817,6 +1010,11 @@ class _ChatPageState extends State<ChatPage> {
   Timer? _typingStop;
   Timer? _receiptRefresh;
   bool _typingSent = false;
+  final Set<String> _selected = {};
+  bool _selecting = false;
+  bool _showBottom = false;
+  int _newBelow = 0;
+  bool _readReceiptsEnabled = true;
 
   @override
   void initState() {
@@ -829,6 +1027,10 @@ class _ChatPageState extends State<ChatPage> {
     _loadReceipt();
     _loadOtherPresence();
     _loadMuted();
+    _loadDraft();
+    _loadChatPreferences();
+    _scroll.addListener(_onScroll);
+    _input.addListener(_saveDraftDebounced);
     _receiptRefresh = Timer.periodic(const Duration(seconds: 5), (_) {
       _loadReceipt();
       _loadOtherPresence();
@@ -840,17 +1042,88 @@ class _ChatPageState extends State<ChatPage> {
     _typingStop?.cancel();
     _receiptRefresh?.cancel();
     _setTyping(false);
+    _saveDraftNow();
+    _input.removeListener(_saveDraftDebounced);
+    _scroll.removeListener(_onScroll);
     _input.dispose();
     _scroll.dispose();
     super.dispose();
   }
 
+  Timer? _draftTimer;
+  void _saveDraftDebounced() {
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 500), _saveDraftNow);
+  }
+  Future<void> _loadDraft() async {
+    final me=sb.auth.currentUser?.id; if(me==null)return;
+    try {
+      final row=await sb.from('message_drafts').select('body').eq('conversation_id',widget.conversationId).eq('user_id',me).maybeSingle();
+      if(row!=null && _input.text.isEmpty){_input.text=(row['body']??'').toString();}
+    } catch(_){}
+  }
+  Future<void> _saveDraftNow() async {
+    final me=sb.auth.currentUser?.id; if(me==null)return;
+    try {
+      final body=_input.text;
+      if(body.trim().isEmpty){
+        await sb.from('message_drafts').delete().eq('conversation_id',widget.conversationId).eq('user_id',me);
+      } else {
+        await sb.from('message_drafts').upsert({'conversation_id':widget.conversationId,'user_id':me,'body':body,'updated_at':DateTime.now().toUtc().toIso8601String()},onConflict:'conversation_id,user_id');
+      }
+    } catch(_){}
+  }
+  Future<void> _loadChatPreferences() async {
+    final me=sb.auth.currentUser?.id; if(me==null)return;
+    try {
+      final row=await sb.from('profiles').select('read_receipts_enabled').eq('id',me).maybeSingle();
+      if(mounted)setState(()=>_readReceiptsEnabled=row?['read_receipts_enabled']!=false);
+    } catch(_){}
+  }
+  void _onScroll(){
+    if(!_scroll.hasClients)return;
+    final away=_scroll.position.maxScrollExtent-_scroll.position.pixels>180;
+    if(away!=_showBottom && mounted)setState(()=>_showBottom=away);
+    if(!away && _newBelow!=0 && mounted)setState(()=>_newBelow=0);
+  }
+  Future<void> _clearForMe() async {
+    final me=sb.auth.currentUser?.id;if(me==null)return;
+    await sb.from('conversation_members').update({'cleared_before':DateTime.now().toUtc().toIso8601String()}).eq('conversation_id',widget.conversationId).eq('user_id',me);
+    if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('History cleared for you.')));
+  }
+  Future<void> _forwardMessages(List<Map<String,dynamic>> items) async {
+    final me=sb.auth.currentUser?.id;if(me==null||items.isEmpty)return;
+    final inbox=await sb.rpc('get_my_dm_inbox');
+    if(!mounted)return;
+    final choice=await showDialog<String>(context:context,builder:(ctx)=>SimpleDialog(title:const Text('Forward to'),children:[
+      for(final raw in inbox) SimpleDialogOption(onPressed:()=>Navigator.pop(ctx,raw['conversation_id'].toString()),child:Text('Conversation ${raw['conversation_id'].toString().substring(0,8)}…'))
+    ]));
+    if(choice==null)return;
+    for(final m in items){
+      if(m['deleted_at']!=null)continue;
+      await sb.from('messages').insert({'conversation_id':choice,'sender_id':me,'body':(m['body']??'').toString(),'message_type':'text','forwarded_from':m['id']});
+    }
+    if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${items.length} message(s) forwarded.')));
+  }
+  Future<void> _bulkDelete() async {
+    final me=sb.auth.currentUser?.id;if(me==null)return;
+    final mine=_latestMessages.where((m)=>_selected.contains(m['id'].toString())&&m['sender_id']==me).toList();
+    for(final m in mine){await _deleteMessage(m);}
+    if(mounted)setState((){_selected.clear();_selecting=false;});
+  }
+  void _bulkCopy(){
+    final items=_latestMessages.where((m)=>_selected.contains(m['id'].toString())).map((m)=>(m['body']??'').toString()).where((x)=>x.isNotEmpty).join('\n');
+    Clipboard.setData(ClipboardData(text:items));
+    setState((){_selected.clear();_selecting=false;});
+  }
   Future<void> _markRead() async {
     final me = sb.auth.currentUser?.id;
     if (me == null) return;
     final now = DateTime.now().toUtc().toIso8601String();
     try {
-      await sb.from('conversation_members').update({'last_read_at': now, 'delivered_at': now})
+      final patch=<String,dynamic>{'delivered_at':now,'marked_unread_at':null};
+      if(_readReceiptsEnabled) patch['last_read_at']=now;
+      await sb.from('conversation_members').update(patch)
           .eq('conversation_id', widget.conversationId)
           .eq('user_id', me);
     } catch (_) {}
@@ -975,6 +1248,32 @@ class _ChatPageState extends State<ChatPage> {
     return 'Sent';
   }
 
+  Future<void> _pickPhoto() async {
+    final me=sb.auth.currentUser; if(me==null||_sending)return;
+    final picked=await ImagePicker().pickImage(source:ImageSource.gallery,imageQuality:88,maxWidth:2560,maxHeight:2560);
+    if(picked==null)return;
+    final bytes=await picked.readAsBytes();
+    if(bytes.length>10*1024*1024){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Photo must be 10 MB or smaller.')));return;}
+    setState(()=>_sending=true);
+    try{
+      final ext=picked.name.toLowerCase().endsWith('.png')?'png':picked.name.toLowerCase().endsWith('.webp')?'webp':'jpg';
+      final mime=ext=='png'?'image/png':ext=='webp'?'image/webp':'image/jpeg';
+      final path='${widget.conversationId}/${DateTime.now().microsecondsSinceEpoch}_${me.id}.$ext';
+      await sb.storage.from('message-images').uploadBinary(path,bytes,fileOptions:FileOptions(contentType:mime,upsert:false));
+      final insertedPhoto = await sb.from('messages').insert({'conversation_id':widget.conversationId,'sender_id':me.id,'body':_input.text.trim(),'message_type':'image','attachment_path':path,'attachment_mime':mime,'attachment_size':bytes.length,'reply_to':_replyingTo?['id']}).select('id').single();
+      try {
+        await sb.functions.invoke('send-message-push', body: {
+          'conversation_id': widget.conversationId,
+          'message_id': insertedPhoto['id'],
+        });
+      } catch (_) {}
+      _input.clear();if(mounted)setState(()=>_replyingTo=null);_scrollToBottom();
+    }catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Photo upload failed: $e')));}
+    finally{if(mounted)setState(()=>_sending=false);}
+  }
+
+  Future<String?> _signedImage(String path) async {try{return await sb.storage.from('message-images').createSignedUrl(path,3600);}catch(_){return null;}}
+
   Future<void> _send() async {
     if (_sending) return;
     final text = _input.text.trim();
@@ -985,14 +1284,23 @@ class _ChatPageState extends State<ChatPage> {
       if (_editing != null) {
         await sb.from('messages').update({'body': text, 'edited_at': DateTime.now().toUtc().toIso8601String()}).eq('id', _editing!['id']);
       } else {
-        await sb.from('messages').insert({
+        final insertedMessage = await sb.from('messages').insert({
           'conversation_id': widget.conversationId,
           'sender_id': u.id,
           'body': text,
           'reply_to': _replyingTo?['id'],
+        }).select('id').single();
+      try {
+        await sb.functions.invoke('send-message-push', body: {
+          'conversation_id': widget.conversationId,
+          'message_id': insertedMessage['id'],
         });
+      } catch (_) {
+        // The message is already sent; a push failure must not block chat delivery.
+      }
       }
       _input.clear();
+      await _saveDraftNow();
       _setTyping(false);
       if (mounted) setState(() { _editing = null; _replyingTo = null; });
       _scrollToBottom();
@@ -1112,6 +1420,7 @@ class _ChatPageState extends State<ChatPage> {
           if (!deleted) ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text('React'), onTap: () { Navigator.pop(ctx); _reactionPicker(m); }),
           if (!deleted) ListTile(leading: const Icon(Icons.push_pin_outlined), title: const Text('Pin'), onTap: () { Navigator.pop(ctx); _pin(m); }),
           if (!deleted) ListTile(leading: const Icon(Icons.reply), title: const Text('Reply'), onTap: () { Navigator.pop(ctx); setState(() => _replyingTo = m); }),
+          if (!deleted) ListTile(leading: const Icon(Icons.forward_outlined), title: const Text('Forward'), onTap: () { Navigator.pop(ctx); _forwardMessages([m]); }),
           if (!deleted) ListTile(leading: const Icon(Icons.copy), title: const Text('Copy'), onTap: () { Clipboard.setData(ClipboardData(text: (m['body'] ?? '').toString())); Navigator.pop(ctx); }),
           if (mine && !deleted) ListTile(leading: const Icon(Icons.edit), title: const Text('Edit'), onTap: () { Navigator.pop(ctx); setState(() => _editing = m); _input.text = (m['body'] ?? '').toString(); }),
           if (mine && !deleted) ListTile(leading: const Icon(Icons.delete_outline), title: const Text('Delete'), onTap: () { Navigator.pop(ctx); _deleteMessage(m); }),
@@ -1142,15 +1451,23 @@ class _ChatPageState extends State<ChatPage> {
               Text(_otherStatus, style: TextStyle(fontSize: 12, color: _otherOnline ? Colors.greenAccent : Theme.of(context).colorScheme.onSurfaceVariant)),
           ]),
         ),
-        actions: [
+        actions: _selecting ? [
+          Center(child:Padding(padding:const EdgeInsets.symmetric(horizontal:8),child:Text('${_selected.length}'))),
+          IconButton(tooltip:'Copy',onPressed:_selected.isEmpty?null:_bulkCopy,icon:const Icon(Icons.copy)),
+          IconButton(tooltip:'Forward',onPressed:_selected.isEmpty?null:() async {final items=_latestMessages.where((m)=>_selected.contains(m['id'].toString())).toList();await _forwardMessages(items);if(mounted)setState((){_selected.clear();_selecting=false;});},icon:const Icon(Icons.forward_outlined)),
+          IconButton(tooltip:'Delete my selected messages',onPressed:_selected.isEmpty?null:_bulkDelete,icon:const Icon(Icons.delete_outline)),
+          IconButton(tooltip:'Cancel',onPressed:()=>setState((){_selected.clear();_selecting=false;}),icon:const Icon(Icons.close)),
+        ] : [
           IconButton(tooltip: 'Search messages', onPressed: _openSearch, icon: const Icon(Icons.search)),
           PopupMenuButton<String>(
             onSelected: (v) {
               if (v == 'mute') _toggleMute();
               if (v == 'profile') Navigator.push(context, MaterialPageRoute(builder: (_) => UserProfilePage(userId: widget.otherUserId)));
+              if (v == 'clear') _clearForMe();
             },
             itemBuilder: (_) => [
               PopupMenuItem(value: 'mute', child: Text(_muted ? 'Unmute chat' : 'Mute chat')),
+              const PopupMenuItem(value: 'clear', child: Text('Clear history for me')),
               const PopupMenuItem(value: 'profile', child: Text('View profile')),
             ],
           ),
@@ -1200,7 +1517,11 @@ class _ChatPageState extends State<ChatPage> {
                     _lastMessageCount = messages.length;
                     _markRead();
                     _loadReceipt();
-                    _scrollToBottom();
+                    if(_scroll.hasClients && _scroll.position.maxScrollExtent-_scroll.position.pixels>180){
+                      _newBelow++;
+                    } else {
+                      _scrollToBottom();
+                    }
                   }
                   final byId = {for (final m in messages) m['id'].toString(): m};
                   return ListView.builder(
@@ -1216,8 +1537,14 @@ class _ChatPageState extends State<ChatPage> {
                       final rs = grouped[m['id'].toString()] ?? const <String, int>{};
                       return Align(
                         alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-                        child: GestureDetector(
-                          onLongPress: () => _menu(m),
+                        child: Dismissible(
+                          key: ValueKey('swipe-${m['id']}'),
+                          direction: DismissDirection.startToEnd,
+                          confirmDismiss: (_) async { if(!deleted)setState(()=>_replyingTo=m); return false; },
+                          background: const Align(alignment:Alignment.centerLeft,child:Padding(padding:EdgeInsets.only(left:18),child:Icon(Icons.reply))),
+                          child: GestureDetector(
+                          onTap: _selecting ? () => setState(() {final id=m['id'].toString();if(!_selected.add(id))_selected.remove(id);if(_selected.isEmpty)_selecting=false;}) : null,
+                          onLongPress: () { if(_selecting){setState(()=>_selected.add(m['id'].toString()));}else{setState((){_selecting=true;_selected.add(m['id'].toString());});} },
                           child: Container(
                             margin: const EdgeInsets.symmetric(vertical: 3),
                             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
@@ -1238,10 +1565,10 @@ class _ChatPageState extends State<ChatPage> {
                                     child: Text(reply['deleted_at'] != null ? 'Message deleted' : (reply['body'] ?? '').toString(), maxLines: 2, overflow: TextOverflow.ellipsis),
                                   ),
                                 ),
-                              Align(
-                                alignment: Alignment.centerLeft,
-                                child: Text(deleted ? 'Message deleted' : (m['body'] ?? '').toString(), style: deleted ? const TextStyle(fontStyle: FontStyle.italic) : null),
-                              ),
+                              if (!deleted && m['message_type']=='image' && m['attachment_path']!=null)
+                                FutureBuilder<String?>(future:_signedImage(m['attachment_path'].toString()),builder:(context,img)=>img.data==null?const SizedBox(width:180,height:120,child:Center(child:CircularProgressIndicator())):GestureDetector(onTap:()=>showDialog(context:context,builder:(_)=>Dialog(child:InteractiveViewer(child:Image.network(img.data!,fit:BoxFit.contain)))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.network(img.data!,width:260,fit:BoxFit.cover))),),
+                              if ((m['body']??'').toString().isNotEmpty || deleted)
+                                Align(alignment:Alignment.centerLeft,child:Text(deleted?'Message deleted':(m['body']??'').toString(),style:deleted?const TextStyle(fontStyle:FontStyle.italic):null)),
                               if (rs.isNotEmpty)
                                 Padding(
                                   padding: const EdgeInsets.only(top: 6),
@@ -1263,6 +1590,7 @@ class _ChatPageState extends State<ChatPage> {
                             ]),
                           ),
                         ),
+                        ),
                       );
                     },
                   );
@@ -1271,6 +1599,18 @@ class _ChatPageState extends State<ChatPage> {
             },
           ),
         ),
+        if (_showBottom)
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right:12,bottom:4),
+              child: FilledButton.tonalIcon(
+                onPressed:(){_scrollToBottom();setState(()=>_newBelow=0);},
+                icon:const Icon(Icons.keyboard_arrow_down),
+                label:Text(_newBelow>0?'$_newBelow new':'Latest'),
+              ),
+            ),
+          ),
         StreamBuilder<List<Map<String, dynamic>>>(
           stream: _typing,
           builder: (context, snap) {
@@ -1302,6 +1642,7 @@ class _ChatPageState extends State<ChatPage> {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
             child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              IconButton(tooltip:'Attach photo',onPressed:_sending?null:_pickPhoto,icon:const Icon(Icons.add_photo_alternate_outlined)),
               Expanded(child: TextField(
                 controller: _input,
                 minLines: 1,
@@ -1320,6 +1661,52 @@ class _ChatPageState extends State<ChatPage> {
   }
 }
 
+
+
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
+  @override State<SettingsPage> createState()=>_SettingsPageState();
+}
+class _SettingsPageState extends State<SettingsPage>{
+  bool _readReceipts=true;
+  String _lastSeen='everyone';
+  double _textScale=1.0;
+  bool _busy=true;
+  @override void initState(){super.initState();_load();}
+  Future<void> _load() async {
+    final me=sb.auth.currentUser?.id;if(me==null)return;
+    try{
+      final p=await sb.from('profiles').select('read_receipts_enabled,last_seen_visibility').eq('id',me).single();
+      if(mounted)setState((){_readReceipts=p['read_receipts_enabled']!=false;_lastSeen=(p['last_seen_visibility']??'everyone').toString();_busy=false;});
+    }catch(_){if(mounted)setState(()=>_busy=false);}
+  }
+  Future<void> _save(Map<String,dynamic> patch) async {
+    final me=sb.auth.currentUser?.id;if(me==null)return;
+    await sb.from('profiles').update(patch).eq('id',me);
+  }
+  @override Widget build(BuildContext context)=>Scaffold(
+    appBar:AppBar(title:const Text('Settings')),
+    body:_busy?const Center(child:CircularProgressIndicator()):ListView(children:[
+      const ListTile(title:Text('Privacy',style:TextStyle(fontWeight:FontWeight.bold))),
+      SwitchListTile(title:const Text('Read receipts'),subtitle:const Text('Let people see when you read messages'),value:_readReceipts,onChanged:(v){setState(()=>_readReceipts=v);_save({'read_receipts_enabled':v});}),
+      ListTile(title:const Text('Last seen'),subtitle:Text(_lastSeen=='nobody'?'Nobody':'Everyone'),trailing:DropdownButton<String>(value:_lastSeen,items:const [DropdownMenuItem(value:'everyone',child:Text('Everyone')),DropdownMenuItem(value:'nobody',child:Text('Nobody'))],onChanged:(v){if(v==null)return;setState(()=>_lastSeen=v);_save({'last_seen_visibility':v});})),
+      const Divider(),
+      const ListTile(title:Text('Notifications',style:TextStyle(fontWeight:FontWeight.bold))),
+      const ListTile(leading:Icon(Icons.notifications_outlined),title:Text('Chat notifications'),subtitle:Text('Per-chat mute is available from each conversation. Push delivery will be enabled when the notification service is connected.')),
+      const Divider(),
+      const ListTile(title:Text('Appearance',style:TextStyle(fontWeight:FontWeight.bold))),
+      ListTile(title:const Text('Text size'),subtitle:Slider(value:_textScale,min:.85,max:1.35,divisions:10,label:'${(_textScale*100).round()}%',onChanged:(v)=>setState(()=>_textScale=v))),
+      const Divider(),
+      const ListTile(title:Text('Security',style:TextStyle(fontWeight:FontWeight.bold))),
+      ListTile(leading:const Icon(Icons.logout),title:const Text('Log out from this device'),onTap:()async{await sb.auth.signOut();if(mounted)Navigator.pop(context);}),
+      ListTile(leading:const Icon(Icons.phonelink_erase),title:const Text('Log out from all other sessions'),onTap:()async{await sb.auth.signOut(scope:SignOutScope.others);if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Other sessions signed out.')));}),
+      ListTile(leading:const Icon(Icons.logout_outlined),title:const Text('Log out from all sessions'),onTap:()async{final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(title:const Text('Log out everywhere?'),content:const Text('All active sessions for this account will be signed out.'),actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Log out'))]));if(ok==true)await sb.auth.signOut(scope:SignOutScope.global);}),
+      const Divider(),
+      const ListTile(title:Text('About',style:TextStyle(fontWeight:FontWeight.bold))),
+      const ListTile(title:Text('Purpa Messenger'),subtitle:Text('v0.5.2 QoL update')),
+    ]),
+  );
+}
 
 class MessageSearchPage extends StatefulWidget {
   final String conversationId;
@@ -1494,18 +1881,18 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
-  final display = TextEditingController(), bio = TextEditingController(), avatar = TextEditingController();
+  final display = TextEditingController(), bio = TextEditingController(), avatar = TextEditingController(), status = TextEditingController();
   Map<String, dynamic>? p;
   bool busy = true;
 
   @override
   void initState() { super.initState(); _load(); }
   @override
-  void dispose() { display.dispose(); bio.dispose(); avatar.dispose(); super.dispose(); }
+  void dispose() { display.dispose(); bio.dispose(); avatar.dispose(); status.dispose(); super.dispose(); }
 
   Future<void> _load() async {
-    final x = await sb.from('profiles').select('username,display_name,bio,avatar_url,role,verified,created_at,last_seen_at').eq('id', sb.auth.currentUser!.id).single();
-    if (mounted) setState(() { p = x; display.text = (x['display_name'] ?? '').toString(); bio.text = (x['bio'] ?? '').toString(); avatar.text = (x['avatar_url'] ?? '').toString(); busy = false; });
+    final x = await sb.from('profiles').select('username,display_name,bio,avatar_url,role,verified,created_at,last_seen_at,custom_status').eq('id', sb.auth.currentUser!.id).single();
+    if (mounted) setState(() { p = x; display.text = (x['display_name'] ?? '').toString(); bio.text = (x['bio'] ?? '').toString(); avatar.text = (x['avatar_url'] ?? '').toString(); status.text=(x['custom_status']??'').toString(); busy = false; });
   }
 
   Future<void> _save() async {
@@ -1513,6 +1900,7 @@ class _ProfilePageState extends State<ProfilePage> {
       'display_name': display.text.trim(),
       'bio': bio.text.trim(),
       'avatar_url': avatar.text.trim().isEmpty ? null : avatar.text.trim(),
+      'custom_status': status.text.trim(),
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }).eq('id', sb.auth.currentUser!.id);
     if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Profile saved.')));
@@ -1541,6 +1929,8 @@ class _ProfilePageState extends State<ProfilePage> {
               TextField(controller: bio, maxLength: 160, maxLines: 3, decoration: const InputDecoration(labelText: 'Bio', border: OutlineInputBorder())),
               const SizedBox(height: 12),
               TextField(controller: avatar, decoration: const InputDecoration(labelText: 'Avatar URL', border: OutlineInputBorder())),
+              const SizedBox(height:12),
+              TextField(controller:status,maxLength:80,decoration:const InputDecoration(labelText:'Custom status',border:OutlineInputBorder())),
               const SizedBox(height: 16),
               FilledButton(onPressed: _save, child: const Text('Save profile')),
               if (devBuild) ...[
@@ -1555,10 +1945,19 @@ class _ProfilePageState extends State<ProfilePage> {
 
 class AdminPage extends StatefulWidget { const AdminPage({super.key}); @override State<AdminPage> createState()=>_AdminPageState(); }
 class _AdminPageState extends State<AdminPage>{
-  List<Map<String,dynamic>> users=[],reports=[]; bool loading=true;
+  List<Map<String,dynamic>> users=[],reports=[]; bool loading=true; String userQuery='';
   @override void initState(){super.initState();_load();}
-  Future<void> _load()async{try{final u=await sb.from('profiles').select('id,username,display_name,role,verified,created_at').order('created_at',ascending:false);final r=await sb.from('message_reports').select().order('created_at',ascending:false);if(mounted)setState((){users=List<Map<String,dynamic>>.from(u);reports=List<Map<String,dynamic>>.from(r);loading=false;});}catch(e){if(mounted){setState(()=>loading=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Admin error: $e')));}}}
+  Future<void> _load()async{try{final u=await sb.from('profiles').select('id,username,display_name,role,verified,created_at,suspended_until,muted_until').order('created_at',ascending:false);final r=await sb.from('message_reports').select().order('created_at',ascending:false);if(mounted)setState((){users=List<Map<String,dynamic>>.from(u);reports=List<Map<String,dynamic>>.from(r);loading=false;});}catch(e){if(mounted){setState(()=>loading=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Admin error: $e')));}}}
   Future<void> _verify(Map<String,dynamic> u)async{await sb.rpc('set_user_verified',params:{'target_user':u['id'],'new_value':u['verified']!=true});await _load();}
   Future<void> _status(Map<String,dynamic> r,String status)async{await sb.from('message_reports').update({'status':status}).eq('id',r['id']);await _load();}
-  @override Widget build(BuildContext context)=>Scaffold(appBar:AppBar(title:const Text('Admin Panel')),body:loading?const Center(child:CircularProgressIndicator()):DefaultTabController(length:2,child:Column(children:[const TabBar(tabs:[Tab(text:'Reports'),Tab(text:'Users')]),Expanded(child:TabBarView(children:[ListView.builder(itemCount:reports.length,itemBuilder:(c,i){final r=reports[i];final ctx=(r['context'] as List?)??[];return ExpansionTile(title:Text('${r['reason']} • ${r['status']}'),subtitle:Text((r['reported_body']??'').toString(),maxLines:2,overflow:TextOverflow.ellipsis),children:[Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Context (up to 5 previous messages)',style:TextStyle(fontWeight:FontWeight.bold)),for(final x in ctx)Padding(padding:const EdgeInsets.symmetric(vertical:3),child:Text('• ${(x as Map)['body']}')),const Divider(),const Text('Reported message',style:TextStyle(fontWeight:FontWeight.bold)),Text((r['reported_body']??'').toString()),if((r['comment']??'').toString().isNotEmpty)...[const SizedBox(height:8),Text('Reporter comment: ${r['comment']}')],const SizedBox(height:10),Wrap(spacing:8,children:[OutlinedButton(onPressed:()=>_status(r,'dismissed'),child:const Text('Dismiss')),FilledButton(onPressed:()=>_status(r,'resolved'),child:const Text('Resolve'))])]))]);}),ListView.builder(itemCount:users.length,itemBuilder:(c,i){final u=users[i];return ListTile(title:Row(children:[Flexible(child:Text('@${u['username']}')),if(u['verified']==true)const Padding(padding:EdgeInsets.only(left:5),child:Icon(Icons.verified,size:18,color:Colors.lightBlueAccent)),if(u['role']=='owner')const Padding(padding:EdgeInsets.only(left:7),child:Text('OWNER',style:TextStyle(fontSize:10,fontWeight:FontWeight.bold)))]),subtitle:Text((u['display_name']??'').toString()),trailing:u['role']=='owner'?null:TextButton(onPressed:()=>_verify(u),child:Text(u['verified']==true?'Unverify':'Verify')));})]))])));
+  Future<void> _moderate(String uid,String action,{String? reportId}) async {
+    final reason=TextEditingController(); String duration='1d';
+    final ok=await showDialog<bool>(context:context,builder:(ctx)=>StatefulBuilder(builder:(ctx,setLocal)=>AlertDialog(title:Text(action.toUpperCase()),content:Column(mainAxisSize:MainAxisSize.min,children:[TextField(controller:reason,maxLines:3,decoration:const InputDecoration(labelText:'Reason',border:OutlineInputBorder())),if(action=='mute'||action=='ban')...[const SizedBox(height:12),DropdownButtonFormField<String>(initialValue:duration,items:const ['1h','6h','12h','1d','3d','7d','30d','permanent'].map((x)=>DropdownMenuItem(value:x,child:Text(x))).toList(),onChanged:(v)=>setLocal(()=>duration=v??'1d'),decoration:const InputDecoration(labelText:'Duration'))]]),actions:[TextButton(onPressed:()=>Navigator.pop(ctx,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(ctx,true),child:Text(action.toUpperCase()))])));
+    if(ok!=true)return;
+    DateTime? until; if(action=='mute'||action=='ban'){final now=DateTime.now().toUtc();until=switch(duration){'1h'=>now.add(const Duration(hours:1)),'6h'=>now.add(const Duration(hours:6)),'12h'=>now.add(const Duration(hours:12)),'1d'=>now.add(const Duration(days:1)),'3d'=>now.add(const Duration(days:3)),'7d'=>now.add(const Duration(days:7)),'30d'=>now.add(const Duration(days:30)),_=>null};}
+    try{await sb.rpc('owner_moderate_user',params:{'target_user':uid,'action_name':action,'reason_text':reason.text.trim(),'until_time':until?.toIso8601String(),'source_report':reportId});if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${action.toUpperCase()} applied.')));await _load();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Moderation failed: $e')));}
+  }
+  Widget _actions(String uid,{String? reportId})=>Wrap(spacing:7,runSpacing:7,children:[OutlinedButton(onPressed:()=>_moderate(uid,'warn',reportId:reportId),child:const Text('Warn')),OutlinedButton(onPressed:()=>_moderate(uid,'mute',reportId:reportId),child:const Text('Mute')),FilledButton(onPressed:()=>_moderate(uid,'ban',reportId:reportId),child:const Text('Ban')),TextButton(onPressed:()=>_moderate(uid,'unmute'),child:const Text('Unmute')),TextButton(onPressed:()=>_moderate(uid,'unban'),child:const Text('Unban'))]);
+  @override Widget build(BuildContext context){final filtered=users.where((u){final q=userQuery.toLowerCase().trim();return q.isEmpty||('@${u['username']} ${(u['display_name']??'')} ${u['id']}').toLowerCase().contains(q);}).toList();return Scaffold(appBar:AppBar(title:const Text('Admin Panel')),body:loading?const Center(child:CircularProgressIndicator()):DefaultTabController(length:2,child:Column(children:[const TabBar(tabs:[Tab(text:'Reports'),Tab(text:'Users')]),Expanded(child:TabBarView(children:[ListView.builder(itemCount:reports.length,itemBuilder:(c,i){final r=reports[i];final evidence=(r['context'] as List?)??[];final target=r['reported_user_id']?.toString();return ExpansionTile(title:Text('${r['reason']} • ${r['status']}'),subtitle:Text((r['reported_body']??'').toString(),maxLines:2,overflow:TextOverflow.ellipsis),children:[Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Context (up to 5 previous messages)',style:TextStyle(fontWeight:FontWeight.bold)),for(final x in evidence)Padding(padding:const EdgeInsets.symmetric(vertical:3),child:Text('• ${(x as Map)['body']}')),const Divider(),const Text('Reported message',style:TextStyle(fontWeight:FontWeight.bold)),Text((r['reported_body']??'').toString()),if((r['comment']??'').toString().isNotEmpty)...[const SizedBox(height:8),Text('Reporter comment: ${r['comment']}')],const SizedBox(height:10),if(target!=null)_actions(target,reportId:r['id']?.toString()),Wrap(spacing:8,children:[OutlinedButton(onPressed:()=>_status(r,'dismissed'),child:const Text('Dismiss')),TextButton(onPressed:()=>_status(r,'resolved'),child:const Text('Resolve without action'))])]))]);}),Column(children:[Padding(padding:const EdgeInsets.all(12),child:TextField(onChanged:(v)=>setState(()=>userQuery=v),decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Search @username, name or UUID',border:OutlineInputBorder()))),Expanded(child:ListView.builder(itemCount:filtered.length,itemBuilder:(c,i){final u=filtered[i];return ExpansionTile(title:Row(children:[Flexible(child:Text('@${u['username']}')),if(u['verified']==true)const Padding(padding:EdgeInsets.only(left:5),child:Icon(Icons.verified,size:18,color:Colors.lightBlueAccent)),if(u['role']=='owner')const Padding(padding:EdgeInsets.only(left:7),child:Text('OWNER',style:TextStyle(fontSize:10,fontWeight:FontWeight.bold)))]),subtitle:Text((u['display_name']??'').toString()),children:[if(u['role']!='owner')Padding(padding:const EdgeInsets.fromLTRB(16,0,16,12),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[_actions(u['id'].toString()),TextButton(onPressed:()=>_verify(u),child:Text(u['verified']==true?'Unverify':'Verify'))]))]);}))]))]))));}
 }
+

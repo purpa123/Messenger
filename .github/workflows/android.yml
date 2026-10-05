@@ -26,19 +26,27 @@ jobs:
       - name: Create Android platform files if missing
         run: |
           if [ ! -d android ]; then flutter create --project-name=purpa_messenger --org=com.purpa --platforms=android .; fi
-
-      - name: Configure Android app
-        run: |
-          rm -f README.md test/widget_test.dart
-          python3 - <<'PYCODE'
+          cp google-services.json android/app/google-services.json
+          python3 - <<'PY'
           from pathlib import Path
-          path = Path('android/app/src/main/AndroidManifest.xml')
-          text = path.read_text()
-          if 'android.permission.INTERNET' not in text:
-              text = text.replace('<application', '<uses-permission android:name="android.permission.INTERNET"/>\n    <application', 1)
-          text = text.replace('android:label="purpa_messenger"', 'android:label="Messenger DEV"')
-          path.write_text(text)
-          PYCODE
+          p=Path('android/app/build.gradle.kts')
+          s=p.read_text()
+          s=s.replace('applicationId = "com.example.purpa_messenger"', 'applicationId = "com.purpa.purpa_messenger"')
+          s=s.replace('namespace = "com.example.purpa_messenger"', 'namespace = "com.purpa.purpa_messenger"')
+          if 'com.google.gms.google-services' not in s:
+              s=s.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services") version "4.4.3"', 1)
+          s=s.replace('compileOptions {', 'compileOptions {\n        isCoreLibraryDesugaringEnabled = true', 1)
+          s += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
+          p.write_text(s)
+          manifest=Path('android/app/src/main/AndroidManifest.xml')
+          m=manifest.read_text()
+          permissions='<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>'
+          m=m.replace('<application', permissions+'\n    <application',1).replace('android:label="purpa_messenger"','android:label="Messenger DEV"')
+          m=m.replace('</application>', '<meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages"/></application>')
+          manifest.write_text(m)
+          Path('test/widget_test.dart').unlink(missing_ok=True)
+          Path('README.md').unlink(missing_ok=True)
+          PY
 
       - name: Prepare signing key
         env:
@@ -63,8 +71,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=messenger-dev" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.4.0-DEV.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.4.0-DEV" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.5.4-PUSH-DEV.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.5.4-PUSH-DEV" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=true" >> "$GITHUB_ENV"
           else
             test -n "$PROD_KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
@@ -75,8 +83,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.4.0.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.4.0" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.5.4-PUSH.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.5.4-PUSH" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=false" >> "$GITHUB_ENV"
           fi
 
