@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:dio/dio.dart';
 import 'package:crypto/crypto.dart';
@@ -15,13 +16,181 @@ import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:cryptography/cryptography.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = bool.fromEnvironment('DEV_BUILD', defaultValue: false);
 
-const appBuildNumber = 14;
-const appVersion = '0.6.4';
+const appBuildNumber = 17;
+const appVersion = '0.7.2';
+
+
+/// Purpa Messenger E2EE v1 (text messages).
+/// Private X25519 material and cached conversation keys stay in Android Keystore-backed storage.
+class E2eeService {
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+  static final _x25519 = X25519();
+  static final _aes = AesGcm.with256bits();
+  static final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
+  static final _rng = Random.secure();
+  static String? _deviceRowId;
+  static String? _deviceId;
+  static SimpleKeyPairData? _deviceKeyPair;
+
+  static List<int> _random(int n) => List<int>.generate(n, (_) => _rng.nextInt(256));
+  static String _b64(List<int> v) => base64UrlEncode(v);
+  static List<int> _unb64(String v) => base64Url.decode(v);
+
+  static Future<void> ensureDevice() async {
+    final user = sb.auth.currentUser;
+    if (user == null) throw StateError('Not signed in');
+    if (_deviceRowId != null && _deviceKeyPair != null) return;
+
+    var did = await _storage.read(key: 'e2ee.device_id');
+    if (did == null) {
+      did = '${DateTime.now().microsecondsSinceEpoch}-${_b64(_random(12))}';
+      await _storage.write(key: 'e2ee.device_id', value: did);
+    }
+    _deviceId = did;
+
+    final privSaved = await _storage.read(key: 'e2ee.x25519.private');
+    final pubSaved = await _storage.read(key: 'e2ee.x25519.public');
+    SimpleKeyPairData kp;
+    if (privSaved == null || pubSaved == null) {
+      final generated = await _x25519.newKeyPair();
+      final priv = await generated.extractPrivateKeyBytes();
+      final pub = await generated.extractPublicKey();
+      await _storage.write(key: 'e2ee.x25519.private', value: _b64(priv));
+      await _storage.write(key: 'e2ee.x25519.public', value: _b64(pub.bytes));
+      kp = SimpleKeyPairData(priv, publicKey: SimplePublicKey(pub.bytes, type: KeyPairType.x25519), type: KeyPairType.x25519);
+    } else {
+      final priv = _unb64(privSaved), pub = _unb64(pubSaved);
+      kp = SimpleKeyPairData(priv, publicKey: SimplePublicKey(pub, type: KeyPairType.x25519), type: KeyPairType.x25519);
+    }
+    _deviceKeyPair = kp;
+    final pub = await kp.extractPublicKey();
+    final existing = await sb.from('e2ee_devices').select('id').eq('user_id', user.id).eq('device_id', did).maybeSingle();
+    if (existing == null) {
+      final row = await sb.from('e2ee_devices').insert({
+        'user_id': user.id,
+        'device_id': did,
+        'identity_public_key': _b64(pub.bytes),
+        'encryption_public_key': _b64(pub.bytes),
+      }).select('id').single();
+      _deviceRowId = row['id'].toString();
+    } else {
+      _deviceRowId = existing['id'].toString();
+      await sb.from('e2ee_devices').update({'last_seen_at': DateTime.now().toUtc().toIso8601String()}).eq('id', _deviceRowId!);
+    }
+  }
+
+  static Future<SecretKey> _wrapKeyFor(SimplePublicKey recipient, String conversationId) async {
+    final shared = await _x25519.sharedSecretKey(keyPair: _deviceKeyPair!, remotePublicKey: recipient);
+    return _hkdf.deriveKey(secretKey: shared, nonce: utf8.encode(conversationId), info: utf8.encode('purpa-messenger-e2ee-wrap-v1'));
+  }
+
+  static Future<SecretKey?> _loadConversationKey(String conversationId) async {
+    final cached = await _storage.read(key: 'e2ee.conv.$conversationId.v1');
+    if (cached != null) return SecretKey(_unb64(cached));
+    await ensureDevice();
+    final row = await sb.from('e2ee_conversation_keys').select('wrapped_key,nonce,sender_device_id')
+        .eq('conversation_id', conversationId).eq('recipient_device_id', _deviceRowId!).eq('key_version', 1).maybeSingle();
+    if (row == null) return null;
+    final sender = await sb.from('e2ee_devices').select('encryption_public_key').eq('id', row['sender_device_id']).maybeSingle();
+    if (sender == null) return null;
+    final wrapKey = await _wrapKeyFor(SimplePublicKey(_unb64(sender['encryption_public_key'].toString()), type: KeyPairType.x25519), conversationId);
+    final packed = jsonDecode(utf8.decode(_unb64(row['wrapped_key'].toString()))) as Map<String,dynamic>;
+    final box = SecretBox(_unb64(packed['c'].toString()), nonce: _unb64(row['nonce'].toString()), mac: Mac(_unb64(packed['m'].toString())));
+    final raw = await _aes.decrypt(box, secretKey: wrapKey);
+    await _storage.write(key: 'e2ee.conv.$conversationId.v1', value: _b64(raw));
+    return SecretKey(raw);
+  }
+
+  static Future<SecretKey> ensureConversationKey(String conversationId) async {
+    await ensureDevice();
+    final existing = await _loadConversationKey(conversationId);
+    if (existing != null) {
+      await _distributeConversationKey(conversationId, existing);
+      return existing;
+    }
+    final raw = _random(32);
+    final key = SecretKey(raw);
+    await _storage.write(key: 'e2ee.conv.$conversationId.v1', value: _b64(raw));
+    await _distributeConversationKey(conversationId, key);
+    return key;
+  }
+
+  static Future<void> _distributeConversationKey(String conversationId, SecretKey key) async {
+    await ensureDevice();
+    final raw=await key.extractBytes();
+    final members=await sb.from('conversation_members').select('user_id').eq('conversation_id',conversationId);
+    final memberIds=members.map((x)=>x['user_id'].toString()).toList();
+    if(memberIds.isEmpty)throw StateError('No conversation members');
+    final devices=await sb.from('e2ee_devices').select('id,user_id,encryption_public_key').inFilter('user_id',memberIds).isFilter('revoked_at',null);
+    if(!devices.any((d)=>d['id'].toString()==_deviceRowId))throw StateError('Current E2EE device missing');
+    final existing=await sb.from('e2ee_conversation_keys').select('recipient_device_id').eq('conversation_id',conversationId).eq('key_version',1);
+    final have=existing.map((x)=>x['recipient_device_id'].toString()).toSet();
+    for(final d in devices){
+      if(have.contains(d['id'].toString()))continue;
+      final recipient=SimplePublicKey(_unb64(d['encryption_public_key'].toString()),type:KeyPairType.x25519);
+      final wrapKey=await _wrapKeyFor(recipient,conversationId);
+      final nonce=_random(12);
+      final box=await _aes.encrypt(raw,secretKey:wrapKey,nonce:nonce);
+      final packed=_b64(utf8.encode(jsonEncode({'c':_b64(box.cipherText),'m':_b64(box.mac.bytes)})));
+      await sb.from('e2ee_conversation_keys').insert({'conversation_id':conversationId,'recipient_device_id':d['id'],'sender_device_id':_deviceRowId,'key_version':1,'wrapped_key':packed,'nonce':_b64(nonce)});
+    }
+  }
+
+  static Future<Map<String,dynamic>> encryptText(String conversationId, String plaintext) async {
+    final key = await ensureConversationKey(conversationId);
+    final nonce = _random(12);
+    final box = await _aes.encrypt(utf8.encode(plaintext), secretKey:key, nonce:nonce);
+    return {
+      'body':'🔒 Encrypted message',
+      'encryption_version':1,
+      'ciphertext':_b64(utf8.encode(jsonEncode({'c':_b64(box.cipherText),'m':_b64(box.mac.bytes)}))),
+      'encryption_nonce':_b64(nonce),
+      'sender_device_id':_deviceRowId,
+      'key_version':1,
+    };
+  }
+
+  static Future<Map<String,dynamic>> encryptAttachment(String conversationId, List<int> plaintext) async {
+    final key = await ensureConversationKey(conversationId);
+    final nonce = _random(12);
+    final box = await _aes.encrypt(plaintext, secretKey:key, nonce:nonce);
+    return {
+      'bytes': box.cipherText,
+      'nonce': _b64(nonce),
+      'mac': _b64(box.mac.bytes),
+      'version': 1,
+    };
+  }
+
+  static Future<List<int>> decryptAttachment(String conversationId, List<int> ciphertext, String nonce, String mac) async {
+    final key = await _loadConversationKey(conversationId);
+    if (key == null) throw StateError('E2EE key unavailable');
+    return _aes.decrypt(SecretBox(ciphertext, nonce:_unb64(nonce), mac:Mac(_unb64(mac))), secretKey:key);
+  }
+
+  static Future<Map<String,dynamic>> decryptMessage(Map<String,dynamic> original) async {
+    final m=Map<String,dynamic>.from(original);
+    if (m['encryption_version'] != 1 || m['ciphertext']==null || m['encryption_nonce']==null) return m;
+    try {
+      final key=await _loadConversationKey(m['conversation_id'].toString());
+      if(key==null){m['body']='🔒 Encrypted message — key unavailable';return m;}
+      final packed=jsonDecode(utf8.decode(_unb64(m['ciphertext'].toString()))) as Map<String,dynamic>;
+      final box=SecretBox(_unb64(packed['c'].toString()),nonce:_unb64(m['encryption_nonce'].toString()),mac:Mac(_unb64(packed['m'].toString())));
+      m['body']=utf8.decode(await _aes.decrypt(box,secretKey:key));
+      m['_e2ee']=true;
+    } catch (_) { m['body']='🔒 Unable to decrypt'; }
+    return m;
+  }
+}
 
 
 Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, String expectedSha, int? expectedSize) async {
@@ -1188,7 +1357,8 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void initState() {
     super.initState();
-    _messages = sb.from('messages').stream(primaryKey: ['id']).eq('conversation_id', widget.conversationId).order('created_at', ascending: true);
+    _messages = sb.from('messages').stream(primaryKey: ['id']).eq('conversation_id', widget.conversationId).order('created_at', ascending: true).asyncMap((rows) async => Future.wait(rows.map(E2eeService.decryptMessage)));
+    E2eeService.ensureDevice().then((_) { if(mounted)setState((){}); }).catchError((_){ });
     _typing = sb.from('typing_states').stream(primaryKey: ['conversation_id', 'user_id']).eq('conversation_id', widget.conversationId);
     _reactions = sb.from('message_reactions').stream(primaryKey: ['message_id', 'user_id', 'emoji']).eq('conversation_id', widget.conversationId);
     _pins = sb.from('conversation_pins').stream(primaryKey: ['conversation_id']).eq('conversation_id', widget.conversationId);
@@ -1427,9 +1597,17 @@ class _ChatPageState extends State<ChatPage> {
     try{
       final ext=picked.name.toLowerCase().endsWith('.png')?'png':picked.name.toLowerCase().endsWith('.webp')?'webp':'jpg';
       final mime=ext=='png'?'image/png':ext=='webp'?'image/webp':'image/jpeg';
-      final path='${widget.conversationId}/${DateTime.now().microsecondsSinceEpoch}_${me.id}.$ext';
-      await sb.storage.from('message-images').uploadBinary(path,bytes,fileOptions:FileOptions(contentType:mime,upsert:false));
-      final insertedPhoto = await sb.from('messages').insert({'conversation_id':widget.conversationId,'sender_id':me.id,'body':_input.text.trim(),'message_type':'image','attachment_path':path,'attachment_mime':mime,'attachment_size':bytes.length,'reply_to':_replyingTo?['id']}).select('id').single();
+      final encryptedPhoto=await E2eeService.encryptAttachment(widget.conversationId,bytes);
+      final path='${widget.conversationId}/${DateTime.now().microsecondsSinceEpoch}_${me.id}.e2ee';
+      await sb.storage.from('message-images').uploadBinary(path,encryptedPhoto['bytes'] as List<int>,fileOptions:const FileOptions(contentType:'application/octet-stream',upsert:false));
+      final caption=_input.text.trim();
+      final captionFields=caption.isEmpty ? <String,dynamic>{'body':''} : await E2eeService.encryptText(widget.conversationId,caption);
+      final insertedPhoto = await sb.from('messages').insert({
+        'conversation_id':widget.conversationId,'sender_id':me.id,...captionFields,
+        'message_type':'image','attachment_path':path,'attachment_mime':mime,'attachment_size':bytes.length,
+        'attachment_encryption_version':1,'attachment_nonce':encryptedPhoto['nonce'],'attachment_mac':encryptedPhoto['mac'],
+        'sender_device_id':E2eeService._deviceRowId,'key_version':1,'reply_to':_replyingTo?['id']
+      }).select('id').single();
       try {
         await sb.functions.invoke('send-message-push', body: {
           'conversation_id': widget.conversationId,
@@ -1441,7 +1619,18 @@ class _ChatPageState extends State<ChatPage> {
     finally{if(mounted)setState(()=>_sending=false);}
   }
 
-  Future<String?> _signedImage(String path) async {try{return await sb.storage.from('message-images').createSignedUrl(path,3600);}catch(_){return null;}}
+  Future<Uint8List?> _imageBytes(Map<String,dynamic> m) async {
+    try {
+      final path=m['attachment_path']?.toString(); if(path==null)return null;
+      if(m['attachment_encryption_version']==1 && m['attachment_nonce']!=null && m['attachment_mac']!=null){
+        final cipher=await sb.storage.from('message-images').download(path);
+        final plain=await E2eeService.decryptAttachment(widget.conversationId,cipher,m['attachment_nonce'].toString(),m['attachment_mac'].toString());
+        return Uint8List.fromList(plain);
+      }
+      final legacy=await sb.storage.from('message-images').download(path);
+      return Uint8List.fromList(legacy);
+    } catch(_){return null;}
+  }
 
   Future<void> _send() async {
     if (_sending) return;
@@ -1451,12 +1640,14 @@ class _ChatPageState extends State<ChatPage> {
     setState(() => _sending = true);
     try {
       if (_editing != null) {
-        await sb.from('messages').update({'body': text, 'edited_at': DateTime.now().toUtc().toIso8601String()}).eq('id', _editing!['id']);
+        final encrypted=await E2eeService.encryptText(widget.conversationId,text);
+        await sb.from('messages').update({...encrypted, 'edited_at': DateTime.now().toUtc().toIso8601String()}).eq('id', _editing!['id']);
       } else {
+        final encrypted=await E2eeService.encryptText(widget.conversationId,text);
         final insertedMessage = await sb.from('messages').insert({
           'conversation_id': widget.conversationId,
           'sender_id': u.id,
-          'body': text,
+          ...encrypted,
           'reply_to': _replyingTo?['id'],
         }).select('id').single();
       try {
@@ -1601,7 +1792,30 @@ class _ChatPageState extends State<ChatPage> {
     );
     if (ok == true) {
       try {
-        await sb.rpc('report_message', params: {'target_message': m['id'], 'report_reason': reason, 'report_comment': comment.text.trim()});
+        if (m['_e2ee'] == true) {
+          // E2EE evidence is disclosed voluntarily by the reporter's device.
+          // Supabase/moderators never receive the conversation key.
+          final targetIndex = _latestMessages.indexWhere((x) => x['id'].toString() == m['id'].toString());
+          if (targetIndex < 0) throw StateError('Reported message is no longer available locally');
+          final start = max(0, targetIndex - 5);
+          final previous = _latestMessages.sublist(start, targetIndex);
+          final contextEvidence = previous.map((x) => {
+            'message_id': x['id']?.toString(),
+            'sender_id': x['sender_id']?.toString(),
+            'body': (x['body'] ?? '').toString(),
+            'created_at': x['created_at']?.toString(),
+            'e2ee': x['_e2ee'] == true,
+          }).toList();
+          await sb.rpc('report_e2ee_message', params: {
+            'target_message': m['id'],
+            'report_reason': reason,
+            'report_comment': comment.text.trim(),
+            'decrypted_reported_body': (m['body'] ?? '').toString(),
+            'decrypted_context': contextEvidence,
+          });
+        } else {
+          await sb.rpc('report_message', params: {'target_message': m['id'], 'report_reason': reason, 'report_comment': comment.text.trim()});
+        }
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Report sent.')));
       } catch (e) {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Report failed: $e')));
@@ -1647,7 +1861,7 @@ class _ChatPageState extends State<ChatPage> {
         title: InkWell(
           onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => UserProfilePage(userId: widget.otherUserId))),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            Text('🔒 ${widget.title}', maxLines: 1, overflow: TextOverflow.ellipsis),
             if (_otherStatus.isNotEmpty)
               Text(_otherStatus, style: TextStyle(fontSize: 12, color: _otherOnline ? Colors.greenAccent : Theme.of(context).colorScheme.onSurfaceVariant)),
           ]),
@@ -1767,16 +1981,16 @@ class _ChatPageState extends State<ChatPage> {
                                   ),
                                 ),
                               if (!deleted && m['message_type']=='image' && m['attachment_path']!=null)
-                                FutureBuilder<String?>(future:_signedImage(m['attachment_path'].toString()),builder:(context,img)=>img.data==null?const SizedBox(width:180,height:120,child:Center(child:CircularProgressIndicator())):GestureDetector(onTap:()=>showDialog(context:context,barrierColor:Colors.black87,builder:(dialogContext)=>Dialog.fullscreen(backgroundColor:Colors.black,child:SafeArea(child:Stack(children:[
+                                FutureBuilder<Uint8List?>(future:_imageBytes(m),builder:(context,img)=>img.connectionState!=ConnectionState.done?const SizedBox(width:180,height:120,child:Center(child:CircularProgressIndicator())):img.data==null?const SizedBox(width:180,height:120,child:Center(child:Icon(Icons.broken_image))):GestureDetector(onTap:()=>showDialog(context:context,barrierColor:Colors.black87,builder:(dialogContext)=>Dialog.fullscreen(backgroundColor:Colors.black,child:SafeArea(child:Stack(children:[
                                   Positioned.fill(child:InteractiveViewer(
                                     minScale:1,
                                     maxScale:5,
                                     boundaryMargin:const EdgeInsets.all(80),
                                     clipBehavior:Clip.none,
-                                    child:Center(child:Image.network(img.data!,fit:BoxFit.contain,gaplessPlayback:true)),
+                                    child:Center(child:Image.memory(img.data!,fit:BoxFit.contain,gaplessPlayback:true)),
                                   )),
                                   Positioned(top:8,right:8,child:IconButton(onPressed:()=>Navigator.pop(dialogContext),icon:const Icon(Icons.close,color:Colors.white))),
-                                ])))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.network(img.data!,width:260,fit:BoxFit.cover))),),
+                                ])))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.memory(img.data!,width:260,fit:BoxFit.cover,gaplessPlayback:true))),)),
                               if ((m['body']??'').toString().isNotEmpty || deleted)
                                 Align(alignment:Alignment.centerLeft,child:Text(deleted?'Message deleted':(m['body']??'').toString(),style:deleted?const TextStyle(fontStyle:FontStyle.italic):null)),
                               if (rs.isNotEmpty)
