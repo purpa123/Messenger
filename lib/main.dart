@@ -10,7 +10,6 @@ import 'package:open_filex/open_filex.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
-import 'package:image_picker/image_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
@@ -23,8 +22,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 18;
-const appVersion = '0.7.3';
+const appBuildNumber = 20;
+const appVersion = '0.7.4';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -139,7 +138,14 @@ class E2eeService {
       final nonce=_random(12);
       final box=await _aes.encrypt(raw,secretKey:wrapKey,nonce:nonce);
       final packed=_b64(utf8.encode(jsonEncode({'c':_b64(box.cipherText),'m':_b64(box.mac.bytes)})));
-      await sb.from('e2ee_conversation_keys').insert({'conversation_id':conversationId,'recipient_device_id':d['id'],'sender_device_id':_deviceRowId,'key_version':1,'wrapped_key':packed,'nonce':_b64(nonce)});
+      // Multiple async sends can try to distribute the same key at once. The
+      // conversation/recipient/version tuple is unique, so make this idempotent
+      // instead of surfacing a PostgreSQL duplicate-key error to the user.
+      await sb.from('e2ee_conversation_keys').upsert(
+        {'conversation_id':conversationId,'recipient_device_id':d['id'],'sender_device_id':_deviceRowId,'key_version':1,'wrapped_key':packed,'nonce':_b64(nonce)},
+        onConflict: 'conversation_id,recipient_device_id,key_version',
+        ignoreDuplicates: true,
+      );
     }
   }
 
@@ -885,15 +891,21 @@ class _ProfileGateState extends State<ProfileGate> {
   bool _loading = true;
   bool _exists = false;
   bool _saving = false;
+  Map<String, dynamic>? _profile;
+  List<Map<String, dynamic>> _notices = [];
+  bool _acknowledging = false;
+  Timer? _moderationTimer;
 
   @override
   void initState() {
     super.initState();
     _checkProfile();
+    _moderationTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkProfile());
   }
 
   @override
   void dispose() {
+    _moderationTimer?.cancel();
     _username.dispose();
     _displayName.dispose();
     super.dispose();
@@ -906,12 +918,23 @@ class _ProfileGateState extends State<ProfileGate> {
     try {
       final profile = await sb
           .from('profiles')
-          .select('id')
+          .select('id,suspended_until,moderation_reason,muted_until,mute_reason')
           .eq('id', user.id)
           .maybeSingle();
+      List<Map<String, dynamic>> notices = [];
+      if (profile != null) {
+        try {
+          final rows = await sb.rpc('get_my_moderation_notices');
+          notices = List<Map<String, dynamic>>.from(rows as List);
+        } catch (_) {
+          // A moderation UI failure must not break normal profile loading.
+        }
+      }
       if (mounted) {
         setState(() {
           _exists = profile != null;
+          _profile = profile == null ? null : Map<String, dynamic>.from(profile);
+          _notices = notices;
           _loading = false;
         });
       }
@@ -959,6 +982,126 @@ class _ProfileGateState extends State<ProfileGate> {
     }
   }
 
+  DateTime? _finiteUtc(dynamic value) {
+    if (value == null) return null;
+    final text = value.toString().toLowerCase();
+    if (text == 'infinity' || text == '-infinity') return null;
+    return DateTime.tryParse(value.toString())?.toUtc();
+  }
+
+  bool _activeUntil(dynamic value) {
+    if (value == null) return false;
+    if (value.toString().toLowerCase() == 'infinity') return true;
+    final dt = _finiteUtc(value);
+    return dt != null && dt.isAfter(DateTime.now().toUtc());
+  }
+
+  String _untilLabel(dynamic value) {
+    if (value == null || value.toString().toLowerCase() == 'infinity') return 'Permanent';
+    final dt = _finiteUtc(value);
+    if (dt == null) return 'Permanent';
+    return DateFormat('MMM d, yyyy • HH:mm').format(dt.toLocal());
+  }
+
+  Future<void> _ackNotice(String id) async {
+    if (_acknowledging) return;
+    setState(() => _acknowledging = true);
+    try {
+      await sb.rpc('ack_moderation_notice', params: {'action_id': id});
+      await _checkProfile();
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Could not acknowledge notice: $e')));
+    } finally {
+      if (mounted) setState(() => _acknowledging = false);
+    }
+  }
+
+  Widget _moderationNoticeScreen(Map<String, dynamic> notice) {
+    final action = (notice['action'] ?? 'warn').toString().toLowerCase();
+    final isMute = action == 'mute';
+    final reason = (notice['reason'] ?? '').toString().trim();
+    final expires = notice['expires_at'];
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(isMute ? Icons.volume_off_outlined : Icons.warning_amber_rounded, size: 58),
+                      const SizedBox(height: 18),
+                      Text(isMute ? 'You have been muted' : 'You received a warning', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 18),
+                      Align(alignment: Alignment.centerLeft, child: Text('Reason', style: Theme.of(context).textTheme.labelLarge)),
+                      const SizedBox(height: 5),
+                      Align(alignment: Alignment.centerLeft, child: Text(reason.isEmpty ? 'No reason provided.' : reason)),
+                      if (isMute) ...[
+                        const SizedBox(height: 16),
+                        Align(alignment: Alignment.centerLeft, child: Text('Duration', style: Theme.of(context).textTheme.labelLarge)),
+                        const SizedBox(height: 5),
+                        Align(alignment: Alignment.centerLeft, child: Text(_untilLabel(expires))),
+                        const SizedBox(height: 10),
+                        const Text('You can still read your chats, but you cannot send messages while the mute is active.'),
+                      ],
+                      const SizedBox(height: 24),
+                      SizedBox(width: double.infinity, child: FilledButton(onPressed: _acknowledging ? null : () => _ackNotice(notice['id'].toString()), child: Text(_acknowledging ? 'Please wait…' : 'Acknowledge'))),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _banScreen() {
+    final reason = (_profile?['moderation_reason'] ?? '').toString().trim();
+    final until = _profile?['suspended_until'];
+    return PopScope(
+      canPop: false,
+      child: Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 520),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(26),
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.block_rounded, size: 64),
+                      const SizedBox(height: 18),
+                      Text('You have been banned', textAlign: TextAlign.center, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 22),
+                      Align(alignment: Alignment.centerLeft, child: Text('Reason', style: Theme.of(context).textTheme.labelLarge)),
+                      const SizedBox(height: 5),
+                      Align(alignment: Alignment.centerLeft, child: Text(reason.isEmpty ? 'No reason provided.' : reason)),
+                      const SizedBox(height: 16),
+                      Align(alignment: Alignment.centerLeft, child: Text('Ban ends', style: Theme.of(context).textTheme.labelLarge)),
+                      const SizedBox(height: 5),
+                      Align(alignment: Alignment.centerLeft, child: Text(_untilLabel(until))),
+                      const SizedBox(height: 24),
+                      OutlinedButton.icon(onPressed: () => sb.auth.signOut(), icon: const Icon(Icons.logout), label: const Text('Sign out')),
+                    ]),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -969,7 +1112,20 @@ class _ProfileGateState extends State<ProfileGate> {
 
     if (sb.auth.currentUser?.emailConfirmedAt == null) return const VerifyEmailGate();
 
-    if (_exists) return const HomePage();
+    if (_exists && _activeUntil(_profile?['suspended_until'])) return _banScreen();
+
+    if (_exists) {
+      final pending = _notices.where((n) {
+        if (n['acknowledged_at'] != null) return false;
+        final action = (n['action'] ?? '').toString().toLowerCase();
+        if (action == 'warn') return true;
+        if (action == 'mute') return n['expires_at'] == null || _activeUntil(n['expires_at']);
+        return false;
+      }).toList()
+        ..sort((a,b) => (a['created_at'] ?? '').toString().compareTo((b['created_at'] ?? '').toString()));
+      if (pending.isNotEmpty) return _moderationNoticeScreen(pending.first);
+      return const HomePage();
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -1734,39 +1890,6 @@ class _ChatPageState extends State<ChatPage> {
     if (_otherLastRead != null && !_otherLastRead!.isBefore(created)) return 'Read';
     if (_otherDelivered != null && !_otherDelivered!.isBefore(created)) return 'Delivered';
     return 'Sent';
-  }
-
-  // ignore: unused_element
-  Future<void> _pickPhoto() async {
-    final me=sb.auth.currentUser; if(me==null||_sending)return;
-    final picked=await ImagePicker().pickImage(source:ImageSource.gallery,imageQuality:88,maxWidth:2560,maxHeight:2560);
-    if(picked==null)return;
-    final bytes=await picked.readAsBytes();
-    if(bytes.length>10*1024*1024){if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Photo must be 10 MB or smaller.')));return;}
-    setState(()=>_sending=true);
-    try{
-      final ext=picked.name.toLowerCase().endsWith('.png')?'png':picked.name.toLowerCase().endsWith('.webp')?'webp':'jpg';
-      final mime=ext=='png'?'image/png':ext=='webp'?'image/webp':'image/jpeg';
-      final encryptedPhoto=await E2eeService.encryptAttachment(widget.conversationId,bytes);
-      final path='${widget.conversationId}/${DateTime.now().microsecondsSinceEpoch}_${me.id}.e2ee';
-      await sb.storage.from('message-images').uploadBinary(path,Uint8List.fromList(encryptedPhoto['bytes'] as List<int>),fileOptions:const FileOptions(contentType:'application/octet-stream',upsert:false));
-      final caption=_input.text.trim();
-      final captionFields=caption.isEmpty ? <String,dynamic>{'body':''} : await E2eeService.encryptText(widget.conversationId,caption);
-      final insertedPhoto = await sb.from('messages').insert({
-        'conversation_id':widget.conversationId,'sender_id':me.id,...captionFields,
-        'message_type':'image','attachment_path':path,'attachment_mime':mime,'attachment_size':bytes.length,
-        'attachment_encryption_version':1,'attachment_nonce':encryptedPhoto['nonce'],'attachment_mac':encryptedPhoto['mac'],
-        'sender_device_id':E2eeService._deviceRowId,'key_version':1,'reply_to':_replyingTo?['id']
-      }).select('id').single();
-      try {
-        await sb.functions.invoke('send-message-push', body: {
-          'conversation_id': widget.conversationId,
-          'message_id': insertedPhoto['id'],
-        });
-      } catch (_) {}
-      _input.clear();if(mounted)setState(()=>_replyingTo=null);_scrollToBottom();
-    }catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Photo upload failed: $e')));}
-    finally{if(mounted)setState(()=>_sending=false);}
   }
 
   Future<Uint8List?> _imageBytes(Map<String,dynamic> m) async {
