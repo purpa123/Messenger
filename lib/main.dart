@@ -1736,6 +1736,7 @@ class _ChatPageState extends State<ChatPage> {
     return 'Sent';
   }
 
+  // ignore: unused_element
   Future<void> _pickPhoto() async {
     final me=sb.auth.currentUser; if(me==null||_sending)return;
     final picked=await ImagePicker().pickImage(source:ImageSource.gallery,imageQuality:88,maxWidth:2560,maxHeight:2560);
