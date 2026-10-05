@@ -85,8 +85,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=messenger-dev" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.5-DEV.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.5-DEV" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.7.7-DEV.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.7.7-DEV" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=true" >> "$GITHUB_ENV"
           else
             test -n "$PROD_KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
@@ -98,8 +98,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.5.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.5" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.7.7.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.7.7" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=false" >> "$GITHUB_ENV"
           fi
 

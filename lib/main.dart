@@ -22,8 +22,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 21;
-const appVersion = '0.7.5';
+const appBuildNumber = 23;
+const appVersion = '0.7.7';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -824,10 +824,10 @@ class LegalPage extends StatelessWidget {
   Widget build(BuildContext context) => Scaffold(appBar: AppBar(title: Text(title)), body: ListView(padding: const EdgeInsets.all(20), children: [Text(body)]));
 }
 
-const tosText = 'Messenger Terms of Service (v0.2.0)\n\nUse the service lawfully and respectfully. Do not abuse, harass, threaten, spam, impersonate others, distribute malware, or attempt unauthorized access. Accounts may be restricted for serious or repeated violations. The service is provided as an early test version and features may change.';
-const privacyText = 'Privacy Policy (v0.2.0)\n\nMessenger stores account information, profile information, conversations, messages, and timestamps needed to operate the service. Authentication and database services are provided through Supabase. Do not put sensitive information in your profile. This test version does not yet claim end-to-end encryption.';
-const touText = 'Terms of Use (v0.2.0)\n\nKeep your account credentials private. Do not interfere with the service, evade moderation, automate spam, or misuse other users information. Features marked as experimental may change or be unavailable.';
-const rulesText = 'Messenger Rules\n\n1. Respect other users.\n2. No harassment, threats, hate speech, or bullying.\n3. No spam, scams, impersonation, or malicious links.\n4. Do not share another persons private information without permission.\n5. Follow applicable laws and platform rules.';
+const tosText = "Purpa Messenger Terms of Service (v0.3.0)\n\nLast updated: October 5, 2026\n\nBy creating an account or using Purpa Messenger, you agree to these Terms.\n\n1. Acceptable use\nUse Purpa Messenger lawfully and respectfully. You may not harass or threaten others, promote hatred, spam, scam, impersonate another person, distribute malware, attempt unauthorized access, abuse the reporting system, evade moderation, or intentionally disrupt the service.\n\n2. Your account\nYou are responsible for activity performed through your account and for keeping your credentials secure. Do not sell, share, or use accounts to bypass restrictions.\n\n3. User content\nYou remain responsible for messages, profile information, and other content you submit. Do not upload content that you do not have the right to share.\n\n4. Moderation\nPurpa Messenger may remove content or restrict, suspend, or terminate accounts when reasonably necessary to enforce these Terms, the Rules, protect users, or comply with law. Serious violations may result in immediate action.\n\n5. Service changes\nPurpa Messenger is under active development. Features may be changed, interrupted, or removed, and test or experimental features may not always work as expected.\n\n6. Security\nDo not attempt to bypass security controls, access another user's account or data, reverse engineer the service for abuse, or exploit vulnerabilities.\n\n7. Availability\nThe service is provided on an as-available basis. No guarantee is made that it will always be uninterrupted or error-free.\n\n8. Changes to these Terms\nThese Terms may be updated as Purpa Messenger develops. Material changes should be reflected by a new version or updated date in the app.";
+const privacyText = 'Purpa Messenger Privacy Policy (v0.3.0)\n\nLast updated: October 5, 2026\n\nThis Privacy Policy explains what information Purpa Messenger processes and why.\n\n1. Information we process\nPurpa Messenger may process account information such as your email address and account identifier; profile information such as username, display name, bio, avatar URL, status, verification/role information, and activity status; conversation and message metadata; moderation information; device identifiers used for end-to-end encryption; and push-notification tokens.\n\n2. Messages and end-to-end encryption\nSupported message content uses Purpa Messenger E2EE. Private X25519 key material and cached conversation keys are stored using Android Keystore-backed secure storage. The service stores encrypted message data required to deliver and synchronize supported encrypted conversations.\n\nEnd-to-end encryption does not hide all metadata. Information needed to operate the service, such as account identifiers, conversation membership, timestamps, delivery-related data, and moderation records, may still be processed.\n\n3. Reports and moderation\nWhen you report a message, information needed to review the report is intentionally shared with moderators. For an encrypted message report, your device may disclose the reported message and up to the 5 messages immediately before it as moderation context, as explained in the report screen before submission.\n\n4. Service providers\nPurpa Messenger uses Supabase for authentication and backend/database services and Firebase Cloud Messaging for push-notification delivery. These providers may process technical information necessary to provide their services.\n\n5. Local device data\nThe app may store credentials or security material in secure device storage and may cache files or other data locally to improve functionality. Removing the app or clearing app data may remove locally stored information and encryption material.\n\n6. How information is used\nInformation is used to authenticate users, operate messaging and profiles, deliver notifications, provide security and encryption, prevent abuse, enforce rules, investigate reports, and maintain the service.\n\n7. Sharing\nPurpa Messenger does not require selling personal information to operate the service. Information may be shared with service providers as necessary to run the app, with moderators when a report is submitted, or when required by applicable law.\n\n8. Your choices\nUse the privacy and profile controls available in the app. Avoid placing sensitive personal information in your public profile or messages unless you understand how it will be processed.\n\n9. Security\nReasonable technical measures are used to protect information, but no online service can guarantee absolute security. Keep your account credentials and device secure.\n\n10. Changes\nThis Privacy Policy may be updated as the app changes. The version and last-updated date will be revised when appropriate.';
+const touText = "Purpa Messenger Terms of Use (v0.3.0)\n\nLast updated: October 5, 2026\n\nThese rules describe how Purpa Messenger may be used day to day.\n\n• Keep your login credentials private and use only accounts you are authorized to access.\n• Do not automate spam, mass unsolicited messages, scams, or abusive behavior.\n• Do not evade blocks, suspensions, bans, rate limits, or other moderation and security measures.\n• Do not probe, exploit, damage, overload, or interfere with Purpa Messenger infrastructure or other users' devices.\n• Do not misuse another person's private information, identity, messages, or content.\n• Do not use Purpa Messenger to distribute malware, phishing, fraudulent links, or other harmful material.\n• Use report tools in good faith. Knowingly false or abusive reports may themselves be moderated.\n• Experimental features may change, be unavailable, or behave differently between versions.\n\nThe Terms of Service, Privacy Policy, Terms of Use, and Messenger Rules should be read together.";
+const rulesText = "Purpa Messenger Rules (v0.3.0)\n\nLast updated: October 5, 2026\n\n1. Respect other users\nNo targeted harassment, bullying, credible threats, hateful conduct, or repeated unwanted contact.\n\n2. No spam or scams\nDo not flood chats, send repetitive unsolicited messages, run scams, impersonate others, or use deceptive links.\n\n3. No malicious activity\nDo not distribute malware, phishing content, credential-stealing material, or content intended to compromise Purpa Messenger or another user's account/device.\n\n4. Protect privacy\nDo not expose, threaten to expose, or distribute another person's private information without permission.\n\n5. No moderation evasion\nDo not use alternate accounts or other methods to bypass blocks, suspensions, bans, or other restrictions. Do not abuse the report system.\n\n6. Follow the law\nDo not use Purpa Messenger for unlawful activity or content.\n\n7. Enforcement\nModeration depends on severity and context. Actions may include content removal, warnings, temporary restrictions, suspension, or permanent account restrictions. Severe violations may receive immediate action.";
 
 class VerifyEmailGate extends StatelessWidget {
   const VerifyEmailGate({super.key});
@@ -907,7 +907,7 @@ class ProfileGate extends StatefulWidget {
   State<ProfileGate> createState() => _ProfileGateState();
 }
 
-class _ProfileGateState extends State<ProfileGate> {
+class _ProfileGateState extends State<ProfileGate> with WidgetsBindingObserver {
   final _username = TextEditingController();
   final _displayName = TextEditingController();
   bool _loading = true;
@@ -921,12 +921,19 @@ class _ProfileGateState extends State<ProfileGate> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkProfile();
-    _moderationTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkProfile());
+    _moderationTimer = Timer.periodic(const Duration(seconds: 10), (_) => _checkProfile());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _checkProfile();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _moderationTimer?.cancel();
     _username.dispose();
     _displayName.dispose();
@@ -1202,6 +1209,35 @@ class _HomePageState extends State<HomePage> {
   Timer? _heartbeat;
   Timer? _updateTimer;
 
+  Future<File?> _chatListCacheFile() async {
+    final uid = sb.auth.currentUser?.id;
+    if (uid == null) return null;
+    final dir = await getApplicationSupportDirectory();
+    final safeUser = sha256.convert(utf8.encode(uid)).toString();
+    final cacheDir = Directory('${dir.path}/chat_cache/$safeUser');
+    if (!await cacheDir.exists()) await cacheDir.create(recursive: true);
+    return File('${cacheDir.path}/inbox.json');
+  }
+
+  Future<void> _loadCachedChats() async {
+    try {
+      final f = await _chatListCacheFile();
+      if (f == null || !await f.exists()) return;
+      final decoded = jsonDecode(await f.readAsString());
+      if (decoded is! List) return;
+      final cached = decoded.whereType<Map>().map((e) => Map<String,dynamic>.from(e)).toList();
+      if (cached.isNotEmpty && mounted) setState(() { _chats = cached; _loading = false; });
+    } catch (_) {}
+  }
+
+  Future<void> _writeCachedChats(List<Map<String,dynamic>> chats) async {
+    try {
+      final f = await _chatListCacheFile();
+      if (f == null) return;
+      await f.writeAsString(jsonEncode(chats), flush: true);
+    } catch (_) {}
+  }
+
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) checkForMessengerUpdate(context); });
@@ -1209,6 +1245,7 @@ class _HomePageState extends State<HomePage> {
     super.initState();
     _touchPresence();
     _heartbeat = Timer.periodic(const Duration(seconds: 45), (_) => _touchPresence());
+    _loadCachedChats();
     _loadChats();
   }
 
@@ -1272,6 +1309,7 @@ class _HomePageState extends State<HomePage> {
         if (fav != 0) return fav;
         return (b['last_message_at'] ?? '').toString().compareTo((a['last_message_at'] ?? '').toString());
       });
+      await _writeCachedChats(output);
 
       if (mounted) {
         setState(() {
@@ -1282,9 +1320,11 @@ class _HomePageState extends State<HomePage> {
     } catch (e) {
       if (mounted) {
         setState(() => _loading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Could not load chats: $e')),
-        );
+        if (_chats.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not load chats: $e')),
+          );
+        }
       }
     }
   }
@@ -1681,10 +1721,63 @@ class _ChatPageState extends State<ChatPage> {
   int _newBelow = 0;
   bool _readReceiptsEnabled = true;
 
+  Future<File?> _messageCacheFile() async {
+    final uid = sb.auth.currentUser?.id;
+    if (uid == null) return null;
+    final dir = await getApplicationSupportDirectory();
+    final safeConversation = sha256.convert(utf8.encode(widget.conversationId)).toString();
+    final safeUser = sha256.convert(utf8.encode(uid)).toString();
+    final cacheDir = Directory('${dir.path}/message_cache/$safeUser');
+    if (!await cacheDir.exists()) await cacheDir.create(recursive: true);
+    return File('${cacheDir.path}/$safeConversation.json');
+  }
+
+  Future<List<Map<String,dynamic>>> _readMessageCache() async {
+    try {
+      final f = await _messageCacheFile();
+      if (f == null || !await f.exists()) return const [];
+      final decoded = jsonDecode(await f.readAsString());
+      if (decoded is! List) return const [];
+      return decoded.whereType<Map>().map((e) => Map<String,dynamic>.from(e)).toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<void> _writeMessageCache(List<Map<String,dynamic>> rows) async {
+    try {
+      final f = await _messageCacheFile();
+      if (f == null) return;
+      // Cache only raw server rows (ciphertext for E2EE messages), never decrypted plaintext.
+      final encryptedRows = rows.where((m) => m['encryption_version'] == 1).toList();
+      final keep = encryptedRows.length > 200 ? encryptedRows.sublist(encryptedRows.length - 200) : encryptedRows;
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsString(jsonEncode(keep), flush: true);
+      if (await f.exists()) await f.delete();
+      await tmp.rename(f.path);
+    } catch (_) {}
+  }
+
+  Stream<List<Map<String,dynamic>>> _cachedMessageStream() async* {
+    final cached = await _readMessageCache();
+    if (cached.isNotEmpty) {
+      yield await Future.wait(cached.map(E2eeService.decryptMessage));
+    }
+    final live = sb.from('messages')
+        .stream(primaryKey: ['id'])
+        .eq('conversation_id', widget.conversationId)
+        .order('created_at', ascending: true);
+    await for (final rows in live) {
+      final raw = rows.map((e) => Map<String,dynamic>.from(e)).toList();
+      await _writeMessageCache(raw);
+      yield await Future.wait(raw.map(E2eeService.decryptMessage));
+    }
+  }
+
   @override
   void initState() {
     super.initState();
-    _messages = sb.from('messages').stream(primaryKey: ['id']).eq('conversation_id', widget.conversationId).order('created_at', ascending: true).asyncMap((rows) async => Future.wait(rows.map(E2eeService.decryptMessage)));
+    _messages = _cachedMessageStream();
     E2eeService.ensureDevice().then((_) { if(mounted)setState((){}); }).catchError((_){ });
     _typing = sb.from('typing_states').stream(primaryKey: ['conversation_id', 'user_id']).eq('conversation_id', widget.conversationId);
     _reactions = sb.from('message_reactions').stream(primaryKey: ['message_id', 'user_id', 'emoji']).eq('conversation_id', widget.conversationId);
@@ -1755,6 +1848,7 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _clearForMe() async {
     final me=sb.auth.currentUser?.id;if(me==null)return;
     await sb.from('conversation_members').update({'cleared_before':DateTime.now().toUtc().toIso8601String()}).eq('conversation_id',widget.conversationId).eq('user_id',me);
+    try { final f = await _messageCacheFile(); if (f != null && await f.exists()) await f.delete(); } catch (_) {}
     if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('History cleared for you.')));
   }
   Future<void> _forwardMessages(List<Map<String,dynamic>> items) async {
@@ -1937,6 +2031,8 @@ class _ChatPageState extends State<ChatPage> {
       if (_editing != null) {
         final encrypted=await E2eeService.encryptText(widget.conversationId,text);
         await sb.from('messages').update({...encrypted, 'edited_at': DateTime.now().toUtc().toIso8601String()}).eq('id', _editing!['id']);
+        _input.clear();
+        await _saveDraftNow();
       } else {
         final encrypted=await E2eeService.encryptText(widget.conversationId,text);
         final insertedMessage = await sb.from('messages').insert({
@@ -1945,6 +2041,9 @@ class _ChatPageState extends State<ChatPage> {
           ...encrypted,
           'reply_to': _replyingTo?['id'],
         }).select('id').single();
+        // The message is committed: clear the composer before waiting for push delivery.
+        _input.clear();
+        await _saveDraftNow();
       try {
         await sb.functions.invoke('send-message-push', body: {
           'conversation_id': widget.conversationId,
@@ -1954,8 +2053,6 @@ class _ChatPageState extends State<ChatPage> {
         // The message is already sent; a push failure must not block chat delivery.
       }
       }
-      _input.clear();
-      await _saveDraftNow();
       _setTyping(false);
       if (mounted) setState(() { _editing = null; _replyingTo = null; });
       _scrollToBottom();
