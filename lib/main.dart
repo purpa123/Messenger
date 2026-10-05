@@ -21,10 +21,10 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
-const devBuild = bool.fromEnvironment('DEV_BUILD', defaultValue: false);
+const devBuild = false;
 
-const appBuildNumber = 17;
-const appVersion = '0.7.2';
+const appBuildNumber = 18;
+const appVersion = '0.7.3';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -418,6 +418,154 @@ Future<void> main() async {
   await initPushNotifications();
 }
 
+
+class SavedAccount {
+  final String email;
+  final String password;
+  const SavedAccount(this.email, this.password);
+}
+
+class SavedAccounts {
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+  static const _indexKey = 'saved_accounts_v1';
+
+  static String _key(String email) =>
+      'saved_account_password_${base64Url.encode(utf8.encode(email.toLowerCase().trim()))}';
+
+  static Future<List<String>> emails() async {
+    final raw = await _storage.read(key: _indexKey);
+    if (raw == null || raw.isEmpty) return [];
+    try {
+      return List<String>.from(jsonDecode(raw));
+    } catch (_) {
+      return [];
+    }
+  }
+
+  static Future<void> save(String email, String password) async {
+    final e = email.toLowerCase().trim();
+    if (e.isEmpty || password.isEmpty) return;
+    final list = await emails();
+    list.removeWhere((x) => x.toLowerCase() == e);
+    list.insert(0, e);
+    await _storage.write(key: _indexKey, value: jsonEncode(list));
+    await _storage.write(key: _key(e), value: password);
+  }
+
+  static Future<String?> password(String email) =>
+      _storage.read(key: _key(email));
+
+  static Future<void> remove(String email) async {
+    final e = email.toLowerCase().trim();
+    final list = await emails();
+    list.removeWhere((x) => x.toLowerCase() == e);
+    await _storage.write(key: _indexKey, value: jsonEncode(list));
+    await _storage.delete(key: _key(e));
+  }
+}
+
+class SwitchAccountsPage extends StatefulWidget {
+  const SwitchAccountsPage({super.key});
+  @override State<SwitchAccountsPage> createState()=>_SwitchAccountsPageState();
+}
+
+class _SwitchAccountsPageState extends State<SwitchAccountsPage> {
+  List<String> _emails = const [];
+  bool _loading = true;
+  String? _switching;
+
+  @override void initState(){super.initState();_load();}
+  Future<void> _load() async {
+    final rows=await SavedAccounts.emails();
+    if(mounted)setState((){_emails=rows;_loading=false;});
+  }
+
+  Future<void> _switch(String email) async {
+    final password=await SavedAccounts.password(email);
+    if(password==null || password.isEmpty){
+      if(mounted) await _loginAgain(email);
+      return;
+    }
+    setState(()=>_switching=email);
+    try{
+      // Sign out locally only. Other sessions/devices remain signed in.
+      await sb.auth.signOut(scope:SignOutScope.local);
+      await sb.auth.signInWithPassword(email:email,password:password);
+      if(mounted) Navigator.of(context).popUntil((r)=>r.isFirst);
+    }on AuthException catch(e){
+      // Stored password may be stale after a password change.
+      if(mounted){
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content:Text('Saved password did not work: ${e.message}')),
+        );
+        await _loginAgain(email);
+      }
+    }finally{
+      if(mounted)setState(()=>_switching=null);
+    }
+  }
+
+  Future<void> _loginAgain(String email) async {
+    final c=TextEditingController();
+    final password=await showDialog<String>(
+      context:context,
+      builder:(d)=>AlertDialog(
+        title:const Text('Sign in again'),
+        content:Column(mainAxisSize:MainAxisSize.min,children:[
+          Text(email),
+          const SizedBox(height:12),
+          TextField(controller:c,obscureText:true,autofocus:true,
+            decoration:const InputDecoration(labelText:'Password',border:OutlineInputBorder())),
+        ]),
+        actions:[
+          TextButton(onPressed:()=>Navigator.pop(d),child:const Text('Cancel')),
+          FilledButton(onPressed:()=>Navigator.pop(d,c.text),child:const Text('Sign in')),
+        ],
+      ),
+    );
+    if(password==null || password.isEmpty)return;
+    try{
+      await sb.auth.signOut(scope:SignOutScope.local);
+      await sb.auth.signInWithPassword(email:email,password:password);
+      await SavedAccounts.save(email,password);
+      if(mounted)Navigator.of(context).popUntil((r)=>r.isFirst);
+    }on AuthException catch(e){
+      if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(e.message)));
+    }
+  }
+
+  @override Widget build(BuildContext context)=>Scaffold(
+    appBar:AppBar(title:const Text('Switch accounts')),
+    body:_loading?const Center(child:CircularProgressIndicator()):ListView(
+      padding:const EdgeInsets.all(12),
+      children:[
+        if(_emails.isEmpty) const ListTile(
+          leading:Icon(Icons.person_off_outlined),
+          title:Text('No saved accounts'),
+          subtitle:Text('Sign in normally first. The account will then be available here.'),
+        ),
+        for(final email in _emails)
+          Card(child:ListTile(
+            leading:const CircleAvatar(child:Icon(Icons.person)),
+            title:Text(email),
+            subtitle:Text(email==sb.auth.currentUser?.email?'Current account':'Tap to switch'),
+            trailing:_switching==email
+              ? const SizedBox(width:22,height:22,child:CircularProgressIndicator(strokeWidth:2))
+              : PopupMenuButton<String>(
+                  onSelected:(v)async{
+                    if(v=='remove'){await SavedAccounts.remove(email);await _load();}
+                  },
+                  itemBuilder:(_)=>const [PopupMenuItem(value:'remove',child:Text('Remove saved login'))],
+                ),
+            onTap:_switching!=null || email==sb.auth.currentUser?.email?null:()=>_switch(email),
+          )),
+      ],
+    ),
+  );
+}
+
 class MessengerApp extends StatelessWidget {
   const MessengerApp({super.key});
 
@@ -516,6 +664,7 @@ class _AuthPageState extends State<AuthPage> {
           email: _email.text.trim(),
           password: _password.text,
         );
+        await SavedAccounts.save(_email.text.trim(), _password.text);
       } else {
         final response = await sb.auth.signUp(
           email: _email.text.trim(),
@@ -523,6 +672,8 @@ class _AuthPageState extends State<AuthPage> {
         );
         if (response.session == null && mounted) {
           Navigator.of(context).push(MaterialPageRoute(builder: (_) => EmailOtpPage(email: _email.text.trim())));
+        } else if (response.session != null) {
+          await SavedAccounts.save(_email.text.trim(), _password.text);
         }
       }
     } on AuthException catch (e) {
@@ -1943,6 +2094,7 @@ class _ChatPageState extends State<ChatPage> {
                     itemCount: messages.length,
                     itemBuilder: (context, index) {
                       final m = messages[index];
+                            if (m['message_type'] == 'image') return const SizedBox.shrink();
                       final mine = m['sender_id'] == sb.auth.currentUser?.id;
                       final deleted = m['deleted_at'] != null;
                       final created = DateTime.tryParse((m['created_at'] ?? '').toString()) ?? DateTime.now();
@@ -2064,7 +2216,7 @@ class _ChatPageState extends State<ChatPage> {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
             child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
-              IconButton(tooltip:'Attach photo',onPressed:_sending?null:_pickPhoto,icon:const Icon(Icons.add_photo_alternate_outlined)),
+              
               Expanded(child: TextField(
                 controller: _input,
                 minLines: 1,
@@ -2120,13 +2272,14 @@ class _SettingsPageState extends State<SettingsPage>{
       ListTile(title:const Text('Text size'),subtitle:Slider(value:_textScale,min:.85,max:1.35,divisions:10,label:'${(_textScale*100).round()}%',onChanged:(v)=>setState(()=>_textScale=v))),
       const Divider(),
       const ListTile(title:Text('Security',style:TextStyle(fontWeight:FontWeight.bold))),
+      ListTile(leading:const Icon(Icons.switch_account),title:const Text('Switch accounts'),subtitle:const Text('Use a saved login on this device'),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const SwitchAccountsPage()))),
       ListTile(leading:const Icon(Icons.logout),title:const Text('Log out from this device'),onTap:()async{await sb.auth.signOut();if(mounted)Navigator.pop(context);}),
       ListTile(leading:const Icon(Icons.phonelink_erase),title:const Text('Log out from all other sessions'),onTap:()async{await sb.auth.signOut(scope:SignOutScope.others);if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Other sessions signed out.')));}),
       ListTile(leading:const Icon(Icons.logout_outlined),title:const Text('Log out from all sessions'),onTap:()async{final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(title:const Text('Log out everywhere?'),content:const Text('All active sessions for this account will be signed out.'),actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Log out'))]));if(ok==true)await sb.auth.signOut(scope:SignOutScope.global);}),
       const Divider(),
       const ListTile(title:Text('About',style:TextStyle(fontWeight:FontWeight.bold))),
       ListTile(leading:const Icon(Icons.system_update_alt),title:const Text('Check for updates'),subtitle:Text('Current version $appVersion'),onTap:()=>checkForMessengerUpdate(context,manual:true)),
-      const ListTile(title:Text('Purpa Messenger'),subtitle:Text('v0.5.2 QoL update')),
+      const ListTile(title:Text('Purpa Messenger'),subtitle:Text('v0.7.3 account switching update')),
     ]),
   );
 }
@@ -2381,6 +2534,163 @@ class _AdminPageState extends State<AdminPage>{
     try{await sb.rpc('owner_moderate_user',params:{'target_user':uid,'action_name':action,'reason_text':reason.text.trim(),'until_time':until?.toIso8601String(),'source_report':reportId});if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('${action.toUpperCase()} applied.')));await _load();}catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Moderation failed: $e')));}
   }
   Widget _actions(String uid,{String? reportId})=>Wrap(spacing:7,runSpacing:7,children:[OutlinedButton(onPressed:()=>_moderate(uid,'warn',reportId:reportId),child:const Text('Warn')),OutlinedButton(onPressed:()=>_moderate(uid,'mute',reportId:reportId),child:const Text('Mute')),FilledButton(onPressed:()=>_moderate(uid,'ban',reportId:reportId),child:const Text('Ban')),TextButton(onPressed:()=>_moderate(uid,'unmute'),child:const Text('Unmute')),TextButton(onPressed:()=>_moderate(uid,'unban'),child:const Text('Unban'))]);
-  @override Widget build(BuildContext context){final filtered=users.where((u){final q=userQuery.toLowerCase().trim();return q.isEmpty||('@${u['username']} ${(u['display_name']??'')} ${u['id']}').toLowerCase().contains(q);}).toList();return Scaffold(appBar:AppBar(title:const Text('Admin Panel')),body:loading?const Center(child:CircularProgressIndicator()):DefaultTabController(length:2,child:Column(children:[const TabBar(tabs:[Tab(text:'Reports'),Tab(text:'Users')]),Expanded(child:TabBarView(children:[ListView.builder(itemCount:reports.length,itemBuilder:(c,i){final r=reports[i];final evidence=(r['context'] as List?)??[];final target=r['reported_user_id']?.toString();return ExpansionTile(title:Text('${r['reason']} • ${r['status']}'),subtitle:Text((r['reported_body']??'').toString(),maxLines:2,overflow:TextOverflow.ellipsis),children:[Padding(padding:const EdgeInsets.all(14),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[const Text('Context (up to 5 previous messages)',style:TextStyle(fontWeight:FontWeight.bold)),for(final x in evidence)Padding(padding:const EdgeInsets.symmetric(vertical:3),child:Text('• ${(x as Map)['body']}')),const Divider(),const Text('Reported message',style:TextStyle(fontWeight:FontWeight.bold)),Text((r['reported_body']??'').toString()),if((r['comment']??'').toString().isNotEmpty)...[const SizedBox(height:8),Text('Reporter comment: ${r['comment']}')],const SizedBox(height:10),if(target!=null)_actions(target,reportId:r['id']?.toString()),Wrap(spacing:8,children:[OutlinedButton(onPressed:()=>_status(r,'dismissed'),child:const Text('Dismiss')),TextButton(onPressed:()=>_status(r,'resolved'),child:const Text('Resolve without action'))])]))]);}),Column(children:[Padding(padding:const EdgeInsets.all(12),child:TextField(onChanged:(v)=>setState(()=>userQuery=v),decoration:const InputDecoration(prefixIcon:Icon(Icons.search),hintText:'Search @username, name or UUID',border:OutlineInputBorder()))),Expanded(child:ListView.builder(itemCount:filtered.length,itemBuilder:(c,i){final u=filtered[i];return ExpansionTile(title:Row(children:[Flexible(child:Text('@${u['username']}')),if(u['verified']==true)const Padding(padding:EdgeInsets.only(left:5),child:Icon(Icons.verified,size:18,color:Colors.lightBlueAccent)),if(u['role']=='owner')const Padding(padding:EdgeInsets.only(left:7),child:Text('OWNER',style:TextStyle(fontSize:10,fontWeight:FontWeight.bold)))]),subtitle:Text((u['display_name']??'').toString()),children:[if(u['role']!='owner')Padding(padding:const EdgeInsets.fromLTRB(16,0,16,12),child:Column(crossAxisAlignment:CrossAxisAlignment.start,children:[_actions(u['id'].toString()),TextButton(onPressed:()=>_verify(u),child:Text(u['verified']==true?'Unverify':'Verify'))]))]);}))])]))])));}
+  @override
+  Widget build(BuildContext context) {
+    final filtered = users.where((u) {
+      final q = userQuery.toLowerCase().trim();
+      return q.isEmpty ||
+          ('@${u['username']} ${(u['display_name'] ?? '')} ${u['id']}')
+              .toLowerCase()
+              .contains(q);
+    }).toList();
+
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Admin Panel'),
+          bottom: const TabBar(
+            tabs: [Tab(text: 'Reports'), Tab(text: 'Users')],
+          ),
+        ),
+        body: loading
+            ? const Center(child: CircularProgressIndicator())
+            : TabBarView(
+                children: [
+                  ListView.builder(
+                    itemCount: reports.length,
+                    itemBuilder: (c, i) {
+                      final r = reports[i];
+                      final evidence = (r['context'] as List?) ?? [];
+                      final target = r['reported_user_id']?.toString();
+                      return ExpansionTile(
+                        title: Text('${r['reason']} • ${r['status']}'),
+                        subtitle: Text(
+                          (r['reported_body'] ?? '').toString(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        children: [
+                          Padding(
+                            padding: const EdgeInsets.all(14),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Context (up to 5 previous messages)',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                                for (final x in evidence)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(vertical: 3),
+                                    child: Text('• ${(x as Map)['body']}'),
+                                  ),
+                                const Divider(),
+                                const Text(
+                                  'Reported message',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                                Text((r['reported_body'] ?? '').toString()),
+                                if ((r['comment'] ?? '').toString().isNotEmpty) ...[
+                                  const SizedBox(height: 8),
+                                  Text('Reporter comment: ${r['comment']}'),
+                                ],
+                                const SizedBox(height: 10),
+                                if (target != null)
+                                  _actions(target, reportId: r['id']?.toString()),
+                                Wrap(
+                                  spacing: 8,
+                                  children: [
+                                    OutlinedButton(
+                                      onPressed: () => _status(r, 'dismissed'),
+                                      child: const Text('Dismiss'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () => _status(r, 'resolved'),
+                                      child: const Text('Resolve without action'),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                  Column(
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(12),
+                        child: TextField(
+                          onChanged: (v) => setState(() => userQuery = v),
+                          decoration: const InputDecoration(
+                            prefixIcon: Icon(Icons.search),
+                            hintText: 'Search @username, name or UUID',
+                            border: OutlineInputBorder(),
+                          ),
+                        ),
+                      ),
+                      Expanded(
+                        child: ListView.builder(
+                          itemCount: filtered.length,
+                          itemBuilder: (c, i) {
+                            final u = filtered[i];
+                            return ExpansionTile(
+                              title: Row(
+                                children: [
+                                  Flexible(child: Text('@${u['username']}')),
+                                  if (u['verified'] == true)
+                                    const Padding(
+                                      padding: EdgeInsets.only(left: 5),
+                                      child: Icon(
+                                        Icons.verified,
+                                        size: 18,
+                                        color: Colors.lightBlueAccent,
+                                      ),
+                                    ),
+                                  if (u['role'] == 'owner')
+                                    const Padding(
+                                      padding: EdgeInsets.only(left: 7),
+                                      child: Text(
+                                        'OWNER',
+                                        style: TextStyle(
+                                          fontSize: 10,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              subtitle: Text((u['display_name'] ?? '').toString()),
+                              children: [
+                                if (u['role'] != 'owner')
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        _actions(u['id'].toString()),
+                                        TextButton(
+                                          onPressed: () => _verify(u),
+                                          child: Text(
+                                            u['verified'] == true ? 'Unverify' : 'Verify',
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
 }
 

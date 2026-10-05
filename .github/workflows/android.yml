@@ -11,7 +11,7 @@ jobs:
     env:
       # TEMPORARY: true = generate a fresh disposable signing key for this run.
       # Set to false to require the permanent production signing secrets.
-      DEV_SIGNING: "true"
+      DEV_SIGNING: "false"
       EXPECTED_CERT_SHA256: "470DC37B411811DE320C3A54FEC1FCCA27EFB8C938C653D1FF4522C5F55B90E7"
 
     steps:
@@ -41,7 +41,7 @@ jobs:
           manifest=Path('android/app/src/main/AndroidManifest.xml')
           m=manifest.read_text()
           permissions='<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>'
-          m=m.replace('<application', permissions+'\n    <application',1).replace('android:label="purpa_messenger"','android:label="Messenger DEV"')
+          m=m.replace('<application', permissions+'\n    <application',1).replace('android:label="purpa_messenger"','android:label="Messenger"')
           m=m.replace('</application>', '<meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages"/></application>')
           manifest.write_text(m)
           Path('test/widget_test.dart').unlink(missing_ok=True)
@@ -71,8 +71,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=messenger-dev" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.2-E2EE-IMAGES-DEV.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.2-E2EE-IMAGES-DEV" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.7.3-PROD-NO-IMAGES-DEV.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.7.3-PROD-NO-IMAGES-DEV" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=true" >> "$GITHUB_ENV"
           else
             test -n "$PROD_KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
@@ -83,8 +83,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.2-E2EE-IMAGES.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.2-E2EE-IMAGES" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.7.3-PROD-NO-IMAGES.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.7.3-PROD-NO-IMAGES" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=false" >> "$GITHUB_ENV"
           fi
 
