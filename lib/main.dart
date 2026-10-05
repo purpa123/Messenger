@@ -17,13 +17,14 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 27;
-const appVersion = '0.8.3';
+const appBuildNumber = 31;
+const appVersion = '0.8.7';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -124,7 +125,7 @@ class E2eeService {
   static Future<void> _distributeConversationKey(String conversationId, SecretKey key) async {
     await ensureDevice();
     final raw=await key.extractBytes();
-    final members=await sb.from('conversation_members').select('user_id').eq('conversation_id',conversationId);
+    final members=await sb.rpc('get_conversation_member_ids', params: {'target_conversation': conversationId});
     final memberIds=members.map((x)=>x['user_id'].toString()).toList();
     if(memberIds.isEmpty)throw StateError('No conversation members');
     final devices=await sb.from('e2ee_devices').select('id,user_id,encryption_public_key').inFilter('user_id',memberIds).isFilter('revoked_at',null);
@@ -388,10 +389,8 @@ Future<void> openPushConversation(RemoteMessage message) async {
     final high = c['dm_user_high']?.toString();
     final other = low == me ? high : low;
     if (other == null) return;
-    final profile = await sb.from('profiles')
-        .select('username,display_name')
-        .eq('id', other)
-        .maybeSingle();
+    final profileRows = await sb.rpc('get_profile_privacy', params: {'target_id': other});
+    final profile = (profileRows as List).isEmpty ? null : Map<String,dynamic>.from(profileRows.first);
     final title = (profile?['display_name'] ?? profile?['username'] ?? 'Chat').toString();
     final ctx = navigatorKey.currentContext;
     if (ctx != null) {
@@ -855,7 +854,7 @@ class LegalPage extends StatelessWidget {
 }
 
 const tosText = "Purpa Messenger Terms of Service (v0.3.0)\n\nLast updated: October 5, 2026\n\nBy creating an account or using Purpa Messenger, you agree to these Terms.\n\n1. Acceptable use\nUse Purpa Messenger lawfully and respectfully. You may not harass or threaten others, promote hatred, spam, scam, impersonate another person, distribute malware, attempt unauthorized access, abuse the reporting system, evade moderation, or intentionally disrupt the service.\n\n2. Your account\nYou are responsible for activity performed through your account and for keeping your credentials secure. Do not sell, share, or use accounts to bypass restrictions.\n\n3. User content\nYou remain responsible for messages, profile information, and other content you submit. Do not upload content that you do not have the right to share.\n\n4. Moderation\nPurpa Messenger may remove content or restrict, suspend, or terminate accounts when reasonably necessary to enforce these Terms, the Rules, protect users, or comply with law. Serious violations may result in immediate action.\n\n5. Service changes\nPurpa Messenger is under active development. Features may be changed, interrupted, or removed, and test or experimental features may not always work as expected.\n\n6. Security\nDo not attempt to bypass security controls, access another user's account or data, reverse engineer the service for abuse, or exploit vulnerabilities.\n\n7. Availability\nThe service is provided on an as-available basis. No guarantee is made that it will always be uninterrupted or error-free.\n\n8. Changes to these Terms\nThese Terms may be updated as Purpa Messenger develops. Material changes should be reflected by a new version or updated date in the app.";
-const privacyText = 'Purpa Messenger Privacy Policy (v0.3.0)\n\nLast updated: October 5, 2026\n\nThis Privacy Policy explains what information Purpa Messenger processes and why.\n\n1. Information we process\nPurpa Messenger may process account information such as your email address and account identifier; profile information such as username, display name, bio, avatar URL, status, verification/role information, and activity status; conversation and message metadata; moderation information; device identifiers used for end-to-end encryption; and push-notification tokens.\n\n2. Messages and end-to-end encryption\nSupported message content uses Purpa Messenger E2EE. Private X25519 key material and cached conversation keys are stored using Android Keystore-backed secure storage. The service stores encrypted message data required to deliver and synchronize supported encrypted conversations.\n\nEnd-to-end encryption does not hide all metadata. Information needed to operate the service, such as account identifiers, conversation membership, timestamps, delivery-related data, and moderation records, may still be processed.\n\n3. Reports and moderation\nWhen you report a message, information needed to review the report is intentionally shared with moderators. For an encrypted message report, your device may disclose the reported message and up to the 5 messages immediately before it as moderation context, as explained in the report screen before submission.\n\n4. Service providers\nPurpa Messenger uses Supabase for authentication and backend/database services and Firebase Cloud Messaging for push-notification delivery. These providers may process technical information necessary to provide their services.\n\n5. Local device data\nThe app may store credentials or security material in secure device storage and may cache files or other data locally to improve functionality. Removing the app or clearing app data may remove locally stored information and encryption material.\n\n6. How information is used\nInformation is used to authenticate users, operate messaging and profiles, deliver notifications, provide security and encryption, prevent abuse, enforce rules, investigate reports, and maintain the service.\n\n7. Sharing\nPurpa Messenger does not require selling personal information to operate the service. Information may be shared with service providers as necessary to run the app, with moderators when a report is submitted, or when required by applicable law.\n\n8. Your choices\nUse the privacy and profile controls available in the app. Avoid placing sensitive personal information in your public profile or messages unless you understand how it will be processed.\n\n9. Security\nReasonable technical measures are used to protect information, but no online service can guarantee absolute security. Keep your account credentials and device secure.\n\n10. Changes\nThis Privacy Policy may be updated as the app changes. The version and last-updated date will be revised when appropriate.';
+const privacyText = 'Purpa Messenger Privacy Policy (v0.3.0)\n\nLast updated: October 5, 2026\n\nThis Privacy Policy explains what information Purpa Messenger processes and why.\n\n1. Information we process\nPurpa Messenger may process account information such as your email address and account identifier; profile information such as username, display name, bio, avatar URL, status, verification/role information, and activity status; conversation and message metadata; moderation information; device identifiers used for end-to-end encryption; and push-notification tokens.\n\n2. Messages and end-to-end encryption\nSupported message content uses Purpa Messenger E2EE. Private X25519 key material and cached conversation keys are stored using Android Keystore-backed secure storage. The service stores encrypted message data required to deliver and synchronize supported encrypted conversations.\n\nEnd-to-end encryption does not hide all metadata. Information needed to operate the service, such as account identifiers, conversation membership, timestamps, delivery-related data, and moderation records, may still be processed.\n\n3. Reports and moderation\nWhen you report a message, information needed to review the report is intentionally shared with moderators. For an encrypted message report, your device may disclose the reported message and up to the 5 messages immediately before it as moderation context, as explained in the report screen before submission.\n\n4. Service providers\nPurpa Messenger uses Supabase for authentication and backend/database services and Firebase Cloud Messaging for push-notification delivery. These providers may process technical information necessary to provide their services.\n\n5. Local device data\nThe app may store credentials or security material in secure device storage and may cache files or other data locally to improve functionality. Removing the app or clearing app data may remove locally stored information and encryption material.\n\n6. How information is used\nInformation is used to authenticate users, operate messaging and profiles, deliver notifications, provide security and encryption, prevent abuse, enforce rules, investigate reports, and maintain the service.\n\n7. Sharing\nPurpa Messenger does not sell personal information. Information may be shared with service providers as necessary to run the app, with moderators when a report is submitted, or when required by applicable law.\n\n8. Your choices\nUse the privacy and profile controls available in the app. Avoid placing sensitive personal information in your public profile or messages unless you understand how it will be processed.\n\n9. Security\nReasonable technical measures are used to protect information, but no online service can guarantee absolute security. Keep your account credentials and device secure.\n\n10. Changes\nThis Privacy Policy may be updated as the app changes. The version and last-updated date will be revised when appropriate.';
 const touText = "Purpa Messenger Terms of Use (v0.3.0)\n\nLast updated: October 5, 2026\n\nThese rules describe how Purpa Messenger may be used day to day.\n\n• Keep your login credentials private and use only accounts you are authorized to access.\n• Do not automate spam, mass unsolicited messages, scams, or abusive behavior.\n• Do not evade blocks, suspensions, bans, rate limits, or other moderation and security measures.\n• Do not probe, exploit, damage, overload, or interfere with Purpa Messenger infrastructure or other users' devices.\n• Do not misuse another person's private information, identity, messages, or content.\n• Do not use Purpa Messenger to distribute malware, phishing, fraudulent links, or other harmful material.\n• Use report tools in good faith. Knowingly false or abusive reports may themselves be moderated.\n• Experimental features may change, be unavailable, or behave differently between versions.\n\nThe Terms of Service, Privacy Policy, Terms of Use, and Messenger Rules should be read together.";
 const rulesText = "Purpa Messenger Rules (v0.3.0)\n\nLast updated: October 5, 2026\n\n1. Respect other users\nNo targeted harassment, bullying, credible threats, hateful conduct, or repeated unwanted contact.\n\n2. No spam or scams\nDo not flood chats, send repetitive unsolicited messages, run scams, impersonate others, or use deceptive links.\n\n3. No malicious activity\nDo not distribute malware, phishing content, credential-stealing material, or content intended to compromise Purpa Messenger or another user's account/device.\n\n4. Protect privacy\nDo not expose, threaten to expose, or distribute another person's private information without permission.\n\n5. No moderation evasion\nDo not use alternate accounts or other methods to bypass blocks, suspensions, bans, or other restrictions. Do not abuse the report system.\n\n6. Follow the law\nDo not use Purpa Messenger for unlawful activity or content.\n\n7. Enforcement\nModeration depends on severity and context. Actions may include content removal, warnings, temporary restrictions, suspension, or permanent account restrictions. Severe violations may receive immediate action.";
 
@@ -975,11 +974,8 @@ class _ProfileGateState extends State<ProfileGate> with WidgetsBindingObserver {
     if (user == null) return;
 
     try {
-      final profile = await sb
-          .from('profiles')
-          .select('id,suspended_until,moderation_reason,muted_until,mute_reason')
-          .eq('id', user.id)
-          .maybeSingle();
+      final profileRows = await sb.rpc('get_my_profile_private');
+      final profile = (profileRows as List).isEmpty ? null : Map<String,dynamic>.from(profileRows.first);
       List<Map<String, dynamic>> notices = [];
       if (profile != null) {
         try {
@@ -1360,11 +1356,10 @@ class _HomePageState extends State<HomePage> {
         if (otherId == null) continue;
         conversation['id'] = conversation['conversation_id'];
 
-        final profile = await sb
-            .from('profiles')
-            .select('username,display_name,avatar_url,role,verified,last_seen_at')
-            .eq('id', otherId)
-            .maybeSingle();
+        final profileRows = await sb.rpc('get_profile_privacy', params: {'target_id': otherId});
+        final profile = (profileRows is List && profileRows.isNotEmpty)
+            ? Map<String,dynamic>.from(profileRows.first)
+            : null;
 
         final membership = await sb
             .from('conversation_members')
@@ -1419,7 +1414,7 @@ class _HomePageState extends State<HomePage> {
     if (url == null || url.trim().isEmpty) return null;
     final uri = Uri.tryParse(url.trim());
     return uri != null && (uri.scheme == 'http' || uri.scheme == 'https')
-        ? NetworkImage(url.trim())
+        ? CachedNetworkImageProvider(url.trim())
         : null;
   }
 
@@ -1621,12 +1616,7 @@ class _SearchPageState extends State<SearchPage> {
     final me = sb.auth.currentUser?.id;
     if (me == null) return;
     try {
-      final rows = await sb
-          .from('profiles')
-          .select('id,username,display_name,avatar_url,bio,role,verified,last_seen_at')
-          .ilike('username', '%$query%')
-          .neq('id', me)
-          .limit(30);
+      final rows = await sb.rpc('search_profiles_privacy', params: {'search_text': query});
       if (mounted) setState(() => _results = List<Map<String, dynamic>>.from(rows));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Search failed: $e')));
@@ -1683,10 +1673,7 @@ class _SearchPageState extends State<SearchPage> {
           conversationId = existing['id'] as String;
         }
 
-        final existingMembership = await sb
-            .from('conversation_members')
-            .select('user_id')
-            .eq('conversation_id', conversationId);
+        final existingMembership = await sb.rpc('get_conversation_member_ids', params: {'target_conversation': conversationId});
         final memberIds = existingMembership.map((row) => row['user_id'] as String).toSet();
         final missing = <Map<String, dynamic>>[];
         if (!memberIds.contains(me)) missing.add({'conversation_id': conversationId, 'user_id': me});
@@ -1916,7 +1903,8 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _loadChatPreferences() async {
     final me=sb.auth.currentUser?.id; if(me==null)return;
     try {
-      final row=await sb.from('profiles').select('read_receipts_enabled').eq('id',me).maybeSingle();
+      final ownRows=await sb.rpc('get_my_profile_private');
+      final row=(ownRows as List).isEmpty ? null : Map<String,dynamic>.from(ownRows.first);
       if(mounted)setState(()=>_readReceiptsEnabled=row?['read_receipts_enabled']!=false);
     } catch(_){}
   }
@@ -1974,10 +1962,8 @@ class _ChatPageState extends State<ChatPage> {
     final me = sb.auth.currentUser?.id;
     if (me == null) return;
     try {
-      final rows = await sb.from('conversation_members')
-          .select('user_id,delivered_at,last_read_at')
-          .eq('conversation_id', widget.conversationId)
-          .neq('user_id', me);
+      final allRows = await sb.rpc('get_conversation_receipts', params: {'target_conversation': widget.conversationId});
+      final rows = (allRows as List).where((row) => row['user_id'] != me).toList();
       if (rows.isNotEmpty && mounted) {
         final d = rows.first['delivered_at'] as String?;
         final r = rows.first['last_read_at'] as String?;
@@ -1991,7 +1977,8 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _loadOtherPresence() async {
     try {
-      final p = await sb.from('profiles').select('last_seen_at').eq('id', widget.otherUserId).maybeSingle();
+      final pr = await sb.rpc('get_profile_privacy', params: {'target_id': widget.otherUserId});
+      final p = (pr is List && pr.isNotEmpty) ? Map<String,dynamic>.from(pr.first) : null;
       if (!mounted) return;
       final raw = p?['last_seen_at'] as String?;
       final dt = raw == null ? null : DateTime.tryParse(raw);
@@ -2568,14 +2555,18 @@ class SettingsPage extends StatefulWidget {
 class _SettingsPageState extends State<SettingsPage>{
   bool _readReceipts=true;
   String _lastSeen='everyone';
+  String _usernameDiscovery='everyone';
+  String _profilePhoto='everyone';
+  String _bioVisibility='everyone';
   double _textScale=1.0;
   bool _busy=true;
   @override void initState(){super.initState();_load();}
   Future<void> _load() async {
     final me=sb.auth.currentUser?.id;if(me==null)return;
     try{
-      final p=await sb.from('profiles').select('read_receipts_enabled,last_seen_visibility').eq('id',me).single();
-      if(mounted)setState((){_readReceipts=p['read_receipts_enabled']!=false;_lastSeen=(p['last_seen_visibility']??'everyone').toString();_busy=false;});
+      final ownRows=await sb.rpc('get_my_profile_private');
+      final p=Map<String,dynamic>.from((ownRows as List).first);
+      if(mounted)setState((){_readReceipts=p['read_receipts_enabled']!=false;_lastSeen=(p['last_seen_visibility']??'everyone').toString();_usernameDiscovery=(p['username_discovery_visibility']??'everyone').toString();_profilePhoto=(p['profile_photo_visibility']??'everyone').toString();_bioVisibility=(p['bio_visibility']??'everyone').toString();_busy=false;});
     }catch(_){if(mounted)setState(()=>_busy=false);}
   }
   Future<void> _save(Map<String,dynamic> patch) async {
@@ -2588,6 +2579,9 @@ class _SettingsPageState extends State<SettingsPage>{
       const ListTile(title:Text('Privacy',style:TextStyle(fontWeight:FontWeight.bold))),
       SwitchListTile(title:const Text('Read receipts'),subtitle:const Text('Let people see when you read messages'),value:_readReceipts,onChanged:(v){setState(()=>_readReceipts=v);_save({'read_receipts_enabled':v});}),
       ListTile(title:const Text('Last seen'),subtitle:Text(_lastSeen=='nobody'?'Nobody':'Everyone'),trailing:DropdownButton<String>(value:_lastSeen,items:const [DropdownMenuItem(value:'everyone',child:Text('Everyone')),DropdownMenuItem(value:'nobody',child:Text('Nobody'))],onChanged:(v){if(v==null)return;setState(()=>_lastSeen=v);_save({'last_seen_visibility':v});})),
+      ListTile(title:const Text('Find me by username'),subtitle:Text(_usernameDiscovery=='nobody'?'Nobody':'Everyone'),trailing:DropdownButton<String>(value:_usernameDiscovery,items:const [DropdownMenuItem(value:'everyone',child:Text('Everyone')),DropdownMenuItem(value:'nobody',child:Text('Nobody'))],onChanged:(v){if(v==null)return;setState(()=>_usernameDiscovery=v);_save({'username_discovery_visibility':v});})),
+      ListTile(title:const Text('Profile photo'),subtitle:Text(_profilePhoto=='nobody'?'Nobody':'Everyone'),trailing:DropdownButton<String>(value:_profilePhoto,items:const [DropdownMenuItem(value:'everyone',child:Text('Everyone')),DropdownMenuItem(value:'nobody',child:Text('Nobody'))],onChanged:(v){if(v==null)return;setState(()=>_profilePhoto=v);_save({'profile_photo_visibility':v});})),
+      ListTile(title:const Text('Bio'),subtitle:Text(_bioVisibility=='nobody'?'Nobody':'Everyone'),trailing:DropdownButton<String>(value:_bioVisibility,items:const [DropdownMenuItem(value:'everyone',child:Text('Everyone')),DropdownMenuItem(value:'nobody',child:Text('Nobody'))],onChanged:(v){if(v==null)return;setState(()=>_bioVisibility=v);_save({'bio_visibility':v});})),
       const Divider(),
       const ListTile(title:Text('Notifications',style:TextStyle(fontWeight:FontWeight.bold))),
       const ListTile(leading:Icon(Icons.notifications_outlined),title:Text('Chat notifications'),subtitle:Text('Per-chat mute is available from each conversation. Push delivery will be enabled when the notification service is connected.')),
@@ -2603,7 +2597,7 @@ class _SettingsPageState extends State<SettingsPage>{
       const Divider(),
       const ListTile(title:Text('About',style:TextStyle(fontWeight:FontWeight.bold))),
       ListTile(leading:const Icon(Icons.system_update_alt),title:const Text('Check for updates'),subtitle:Text('Current version $appVersion'),onTap:()=>checkForMessengerUpdate(context,manual:true)),
-      const ListTile(title:Text('Purpa Messenger'),subtitle:Text('v0.7.3 account switching update')),
+      ListTile(title:const Text('Purpa Messenger'),subtitle:Text('v$appVersion')),
     ]),
   );
 }
@@ -2676,6 +2670,18 @@ class _MessageSearchPageState extends State<MessageSearchPage> {
   );
 }
 
+class AdminPrivacyNotice extends StatelessWidget {
+  const AdminPrivacyNotice({super.key});
+  @override
+  Widget build(BuildContext context) => const Padding(
+    padding: EdgeInsets.only(top:4,bottom:4),
+    child: Text(
+      'You are seeing this because you are an admin.',
+      style: TextStyle(color: Colors.amber, fontSize: 12, fontWeight: FontWeight.w600),
+    ),
+  );
+}
+
 class UserProfilePage extends StatefulWidget {
   final String userId;
   const UserProfilePage({super.key, required this.userId});
@@ -2699,7 +2705,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
   Future<void> _load() async {
     final me = sb.auth.currentUser?.id;
     if (me == null) return;
-    final profile = await sb.from('profiles').select('username,display_name,avatar_url,bio,role,verified,created_at,last_seen_at').eq('id', widget.userId).single();
+    final profileRows = await sb.rpc('get_profile_privacy', params: {'target_id': widget.userId});
+    final profile = Map<String,dynamic>.from((profileRows as List).first);
     final mine = await sb.from('user_blocks').select('blocker_id').eq('blocker_id', me).eq('blocked_id', widget.userId).maybeSingle();
     final theirs = await sb.from('user_blocks').select('blocker_id').eq('blocker_id', widget.userId).eq('blocked_id', me).maybeSingle();
     if (mounted) setState(() { _profile = profile; _blockedByMe = mine != null; _blockedMe = theirs != null; _loading = false; });
@@ -2748,7 +2755,8 @@ class _UserProfilePageState extends State<UserProfilePage> {
     return Scaffold(
       appBar: AppBar(title: const Text('Profile')),
       body: ListView(padding: const EdgeInsets.all(22), children: [
-        Center(child: CircleAvatar(radius: 48, backgroundImage: validAvatar ? NetworkImage(avatarUrl) : null, child: validAvatar ? null : Text(username.isEmpty ? '?' : username[0].toUpperCase(), style: const TextStyle(fontSize: 32)))),
+        Center(child: CircleAvatar(radius: 48, backgroundImage: validAvatar ? CachedNetworkImageProvider(avatarUrl) : null, child: validAvatar ? null : Text(username.isEmpty ? '?' : username[0].toUpperCase(), style: const TextStyle(fontSize: 32)))),
+        if (p['admin_override'] == true && p['avatar_hidden'] == true) const Center(child: AdminPrivacyNotice()),
         const SizedBox(height: 14),
         Center(child: Row(mainAxisSize: MainAxisSize.min, children: [
           Flexible(child: Text(display.isEmpty ? '@$username' : display, style: Theme.of(context).textTheme.headlineSmall)),
@@ -2757,10 +2765,12 @@ class _UserProfilePageState extends State<UserProfilePage> {
         Center(child: Text('@$username')),
         const SizedBox(height: 4),
         Center(child: Text(_lastSeen(), style: Theme.of(context).textTheme.bodySmall)),
+        if (p['admin_override'] == true && p['last_seen_hidden'] == true) const Center(child: AdminPrivacyNotice()),
         if (p['role'] == 'owner') const Padding(padding: EdgeInsets.only(top: 8), child: Center(child: Text('OWNER', style: TextStyle(fontWeight: FontWeight.bold)))),
         if ((p['bio'] ?? '').toString().trim().isNotEmpty) ...[
           const SizedBox(height: 22),
           Text((p['bio'] ?? '').toString(), textAlign: TextAlign.center),
+          if (p['admin_override'] == true && p['bio_hidden'] == true) const Center(child: AdminPrivacyNotice()),
         ],
         const SizedBox(height: 24),
         if (_blockedMe) const Card(child: ListTile(leading: Icon(Icons.block), title: Text('This user has blocked you.'))),
@@ -2791,7 +2801,8 @@ class _ProfilePageState extends State<ProfilePage> {
   void dispose() { display.dispose(); bio.dispose(); avatar.dispose(); status.dispose(); super.dispose(); }
 
   Future<void> _load() async {
-    final x = await sb.from('profiles').select('username,display_name,bio,avatar_url,role,verified,created_at,last_seen_at,custom_status').eq('id', sb.auth.currentUser!.id).single();
+    final ownRows = await sb.rpc('get_my_profile_private');
+    final x = Map<String,dynamic>.from((ownRows as List).first);
     if (mounted) setState(() { p = x; display.text = (x['display_name'] ?? '').toString(); bio.text = (x['bio'] ?? '').toString(); avatar.text = (x['avatar_url'] ?? '').toString(); status.text=(x['custom_status']??'').toString(); busy = false; });
   }
 
@@ -2816,7 +2827,7 @@ class _ProfilePageState extends State<ProfilePage> {
       body: busy
           ? const Center(child: CircularProgressIndicator())
           : ListView(padding: const EdgeInsets.all(20), children: [
-              Center(child: CircleAvatar(radius: 42, backgroundImage: validAvatar ? NetworkImage(avatarUrl) : null, child: validAvatar ? null : Text((p?['username'] ?? '?').toString().substring(0, 1).toUpperCase()))),
+              Center(child: CircleAvatar(radius: 42, backgroundImage: validAvatar ? CachedNetworkImageProvider(avatarUrl) : null, child: validAvatar ? null : Text((p?['username'] ?? '?').toString().substring(0, 1).toUpperCase()))),
               const SizedBox(height: 12),
               Center(child: Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
                 Text('@${p?['username']}', style: Theme.of(context).textTheme.titleLarge),
@@ -2847,7 +2858,7 @@ class AdminPage extends StatefulWidget { const AdminPage({super.key}); @override
 class _AdminPageState extends State<AdminPage>{
   List<Map<String,dynamic>> users=[],reports=[]; bool loading=true; String userQuery='';
   @override void initState(){super.initState();_load();}
-  Future<void> _load()async{try{final u=await sb.from('profiles').select('id,username,display_name,role,verified,created_at,suspended_until,muted_until').order('created_at',ascending:false);final r=await sb.from('message_reports').select().order('created_at',ascending:false);if(mounted)setState((){users=List<Map<String,dynamic>>.from(u);reports=List<Map<String,dynamic>>.from(r);loading=false;});}catch(e){if(mounted){setState(()=>loading=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Admin error: $e')));}}}
+  Future<void> _load()async{try{final u=await sb.rpc('admin_list_profiles_private');final r=await sb.from('message_reports').select().order('created_at',ascending:false);if(mounted)setState((){users=List<Map<String,dynamic>>.from(u);reports=List<Map<String,dynamic>>.from(r);loading=false;});}catch(e){if(mounted){setState(()=>loading=false);ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Admin error: $e')));}}}
   Future<void> _verify(Map<String,dynamic> u)async{await sb.rpc('set_user_verified',params:{'target_user':u['id'],'new_value':u['verified']!=true});await _load();}
   Future<void> _status(Map<String,dynamic> r,String status)async{await sb.from('message_reports').update({'status':status}).eq('id',r['id']);await _load();}
   Future<void> _moderate(String uid,String action,{String? reportId}) async {
