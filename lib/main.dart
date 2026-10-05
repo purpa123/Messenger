@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:crypto/crypto.dart';
@@ -69,7 +70,7 @@ Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) 
   try {
     final channel = devBuild ? 'dev' : 'stable';
     final raw = await sb.from('app_releases').select('version,build_number,severity,changelog,download_url,published_at,apk_sha256,apk_size_bytes').eq('channel',channel).eq('active',true).order('build_number',ascending:false).limit(1);
-    if (raw is! List || raw.isEmpty) {
+    if (raw.isEmpty) {
       if (manual && context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('You are up to date.')));
       return;
     }
