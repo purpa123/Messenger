@@ -80,6 +80,7 @@ jobs:
             test -n "$PROD_KEY_ALIAS" || { echo "KEY_ALIAS is missing"; exit 1; }
             test -n "$PROD_KEY_PASSWORD" || { echo "KEY_PASSWORD is missing"; exit 1; }
             printf '%s' "$PROD_KEYSTORE_BASE64" | base64 --decode > android/app/messenger-release.jks
+            keytool -list -keystore android/app/messenger-release.jks -storepass:env PROD_KEYSTORE_PASSWORD -alias "$PROD_KEY_ALIAS"
             echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
