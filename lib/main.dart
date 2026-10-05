@@ -22,8 +22,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 24;
-const appVersion = '0.7.8';
+const appBuildNumber = 25;
+const appVersion = '0.8.0';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -264,7 +264,7 @@ Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, int buildN
 Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) async {
   try {
     final channel = devBuild ? 'dev' : 'stable';
-    final raw = await sb.from('app_releases').select('version,build_number,severity,changelog,download_url,published_at,apk_sha256,apk_size_bytes').eq('channel',channel).eq('active',true).order('build_number',ascending:false).limit(1);
+    final raw = await sb.from('app_releases').select('version,build_number,severity,changelog,download_url,published_at,apk_sha256,apk_size_bytes,minimum_build_number').eq('channel',channel).eq('active',true).order('build_number',ascending:false).limit(1);
     if (raw.isEmpty) {
       if (manual && context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('You are up to date.')));
       return;
@@ -277,7 +277,10 @@ Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) 
     }
     if (!context.mounted) return;
     final severity=(r['severity']??'normal').toString();
-    final critical=severity=='critical';
+    final minimumBuild=(r['minimum_build_number'] as num?)?.toInt();
+    // A client older than the minimum supported build must update, even if
+    // the latest release itself is marked as a normal/optional update.
+    final critical=severity=='critical' || (minimumBuild != null && appBuildNumber < minimumBuild);
     final version=(r['version']??'New version').toString();
     final notes=(r['changelog']??'').toString();
     final url=(r['download_url']??'').toString();
