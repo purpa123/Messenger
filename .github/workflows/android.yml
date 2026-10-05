@@ -71,8 +71,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=messenger-dev" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.5.4-PUSH-DEV.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.5.4-PUSH-DEV" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.6.4-OTP-MENU-FIX-DEV.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.6.4-OTP-MENU-FIX-DEV" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=true" >> "$GITHUB_ENV"
           else
             test -n "$PROD_KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
@@ -83,8 +83,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.5.4-PUSH.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.5.4-PUSH" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.6.4-OTP-MENU-FIX.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.6.4-OTP-MENU-FIX" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=false" >> "$GITHUB_ENV"
           fi
 
@@ -111,6 +111,20 @@ jobs:
 
       - run: flutter pub get
       - run: flutter analyze --no-fatal-infos
+
+      - name: Enable in-app APK updater
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path("android/app/src/main/AndroidManifest.xml")
+          s=p.read_text()
+          perm='<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
+          if perm not in s:
+              s=s.replace("<manifest", "<manifest", 1)
+              i=s.find(">", s.find("<manifest"))+1
+              s=s[:i]+"\n    "+perm+s[i:]
+          p.write_text(s)
+          PY
 
       - name: Build APK
         run: flutter build apk --release --dart-define=DEV_BUILD=$DART_DEV_DEFINE

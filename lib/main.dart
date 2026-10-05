@@ -1,6 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dio/dio.dart';
+import 'package:crypto/crypto.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:open_filex/open_filex.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
@@ -8,11 +12,118 @@ import 'package:image_picker/image_picker.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = bool.fromEnvironment('DEV_BUILD', defaultValue: false);
+
+const appBuildNumber = 14;
+const appVersion = '0.6.4';
+
+
+Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, String expectedSha, int? expectedSize) async {
+  BuildContext? progressContext;
+  double progress=0;
+  bool cancelled=false;
+  final cancel=CancelToken();
+  showDialog<void>(context:context,barrierDismissible:false,builder:(c){
+    progressContext=c;
+    return StatefulBuilder(builder:(c,setLocal)=>PopScope(canPop:false,child:AlertDialog(
+      title:const Text('Downloading update'),
+      content:Column(mainAxisSize:MainAxisSize.min,children:[
+        LinearProgressIndicator(value:progress==0?null:progress),
+        const SizedBox(height:12),
+        Text(progress==0?'Starting…':'${(progress*100).clamp(0,100).toStringAsFixed(0)}%'),
+      ]),
+      actions:[TextButton(onPressed:(){cancelled=true;cancel.cancel();Navigator.pop(c);},child:const Text('Cancel'))],
+    )));
+  });
+  try{
+    final dir=await getTemporaryDirectory();
+    final file=File('${dir.path}/purpa-messenger-update.apk');
+    await Dio().downloadUri(uri,file.path,cancelToken:cancel,onReceiveProgress:(got,total){
+      if(total>0){progress=got/total;}
+      if(progressContext!=null && progressContext!.mounted){
+        // Rebuild dialog by notifying its route; progress text is secondary, system download still proceeds.
+        (progressContext as Element).markNeedsBuild();
+      }
+    });
+    if(cancelled)return;
+    if(expectedSize!=null && expectedSize>0 && await file.length()!=expectedSize)throw Exception('Downloaded APK size does not match release metadata.');
+    if(expectedSha.isNotEmpty){
+      final digest=sha256.convert(await file.readAsBytes()).toString();
+      if(digest.toLowerCase()!=expectedSha.toLowerCase())throw Exception('APK verification failed (SHA-256 mismatch).');
+    }
+    if(progressContext!=null && progressContext!.mounted)Navigator.pop(progressContext!);
+    final result=await OpenFilex.open(file.path,type:'application/vnd.android.package-archive');
+    if(result.type!=ResultType.done)throw Exception('Android Installer could not be opened: ${result.message}');
+  }catch(e){
+    if(progressContext!=null && progressContext!.mounted)Navigator.pop(progressContext!);
+    if(context.mounted)showDialog(context:context,builder:(c)=>AlertDialog(title:const Text('Update failed'),content:Text('$e'),actions:[TextButton(onPressed:()=>Navigator.pop(c),child:const Text('OK'))]));
+  }
+}
+
+Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) async {
+  try {
+    final channel = devBuild ? 'dev' : 'stable';
+    final raw = await sb.from('app_releases').select('version,build_number,severity,changelog,download_url,published_at,apk_sha256,apk_size_bytes').eq('channel',channel).eq('active',true).order('build_number',ascending:false).limit(1);
+    if (raw is! List || raw.isEmpty) {
+      if (manual && context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('You are up to date.')));
+      return;
+    }
+    final r = Map<String,dynamic>.from(raw.first);
+    final remoteBuild = (r['build_number'] as num?)?.toInt() ?? 0;
+    if (remoteBuild <= appBuildNumber) {
+      if (manual && context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('You are up to date.')));
+      return;
+    }
+    if (!context.mounted) return;
+    final severity=(r['severity']??'normal').toString();
+    final critical=severity=='critical';
+    final version=(r['version']??'New version').toString();
+    final notes=(r['changelog']??'').toString();
+    final url=(r['download_url']??'').toString();
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: !critical,
+      builder:(ctx)=>PopScope(
+        canPop: !critical,
+        child: AlertDialog(
+          icon:Icon(critical?Icons.warning_amber_rounded:Icons.system_update_alt),
+          title:Text(critical?'Critical update required':'Update available — v$version'),
+          content:SingleChildScrollView(child:Text(critical
+            ? 'This update is required to continue using Purpa Messenger.${notes.isEmpty?'':'\n\nWhat’s new:\n$notes'}'
+            : '${notes.isEmpty?'A new version of Purpa Messenger is available.':'What’s new:\n$notes'}')),
+          actions:[
+            if(!critical) TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Later')),
+            FilledButton.icon(
+              icon:const Icon(Icons.download_outlined),
+              label:Text(critical?'Update now':'Update'),
+              onPressed:() async {
+                final uri=Uri.tryParse(url);
+                if(uri==null || uri.scheme!='https'){return;}
+                final choice=await showModalBottomSheet<String>(context:ctx,builder:(c)=>SafeArea(child:Wrap(children:[
+                  const ListTile(title:Text('How do you want to update?')),
+                  ListTile(leading:const Icon(Icons.auto_mode),title:const Text('Automatically'),subtitle:const Text('Download the APK in Messenger, verify it, then open Android Installer.'),onTap:()=>Navigator.pop(c,'auto')),
+                  ListTile(leading:const Icon(Icons.open_in_browser),title:const Text('Manually'),subtitle:const Text('Open the download page in your browser.'),onTap:()=>Navigator.pop(c,'manual')),
+                ])));
+                if(choice=='manual'){await launchUrl(uri,mode:LaunchMode.externalApplication);return;}
+                if(choice=='auto'){
+                  await _downloadAndInstallUpdate(ctx,uri,(r['apk_sha256']??'').toString(),(r['apk_size_bytes'] as num?)?.toInt());
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  } catch (_) {
+    if(manual && context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Could not check for updates.')));
+  }
+}
+
 
 
 final navigatorKey = GlobalKey<NavigatorState>();
@@ -243,7 +354,7 @@ class _AuthPageState extends State<AuthPage> {
           password: _password.text,
         );
         if (response.session == null && mounted) {
-          Navigator.of(context).push(MaterialPageRoute(builder: (_) => CheckEmailPage(email: _email.text.trim())));
+          Navigator.of(context).push(MaterialPageRoute(builder: (_) => EmailOtpPage(email: _email.text.trim())));
         }
       }
     } on AuthException catch (e) {
@@ -371,22 +482,75 @@ const privacyText = 'Privacy Policy (v0.2.0)\n\nMessenger stores account informa
 const touText = 'Terms of Use (v0.2.0)\n\nKeep your account credentials private. Do not interfere with the service, evade moderation, automate spam, or misuse other users information. Features marked as experimental may change or be unavailable.';
 const rulesText = 'Messenger Rules\n\n1. Respect other users.\n2. No harassment, threats, hate speech, or bullying.\n3. No spam, scams, impersonation, or malicious links.\n4. Do not share another persons private information without permission.\n5. Follow applicable laws and platform rules.';
 
-class VerifyEmailGate extends StatefulWidget {
+class VerifyEmailGate extends StatelessWidget {
   const VerifyEmailGate({super.key});
-  @override State<VerifyEmailGate> createState() => _VerifyEmailGateState();
+  @override Widget build(BuildContext context) {
+    final email=sb.auth.currentUser?.email;
+    if(email==null)return const Scaffold(body:Center(child:Text('Email unavailable.')));
+    return EmailOtpPage(email:email, signedInGate:true);
+  }
 }
-class _VerifyEmailGateState extends State<VerifyEmailGate> {
+
+class EmailOtpPage extends StatefulWidget {
+  final String email;
+  final bool signedInGate;
+  const EmailOtpPage({super.key,required this.email,this.signedInGate=false});
+  @override State<EmailOtpPage> createState()=>_EmailOtpPageState();
+}
+class _EmailOtpPageState extends State<EmailOtpPage>{
+  final code=TextEditingController();
   bool busy=false; int cooldown=0; Timer? timer;
-  @override void dispose(){timer?.cancel();super.dispose();}
-  Future<void> resend() async {
-    if(cooldown>0)return;
+  @override void dispose(){timer?.cancel();code.dispose();super.dispose();}
+  void snack(String x){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text(x)));}
+  Future<void> verify() async{
+    final token=code.text.trim();
+    if(token.length<6){snack('Enter the verification code from your email.');return;}
     setState(()=>busy=true);
-    try{await sb.auth.resend(type: OtpType.signup,email: sb.auth.currentUser!.email!); if(mounted){setState(()=>cooldown=60);timer=Timer.periodic(const Duration(seconds:1),(t){if(!mounted)return;if(cooldown<=1){t.cancel();setState(()=>cooldown=0);}else setState(()=>cooldown--);});}}
-    catch(e){if(mounted)ScaffoldMessenger.of(context).showSnackBar(SnackBar(content:Text('Could not resend: $e')));}
+    try{
+      await sb.auth.verifyOTP(email:widget.email,token:token,type:OtpType.signup);
+      if(!mounted)return;
+      if(Navigator.canPop(context))Navigator.pop(context);
+      else setState((){});
+    }on AuthException catch(e){snack(e.message);}
+    catch(e){snack('Verification failed: $e');}
     finally{if(mounted)setState(()=>busy=false);}
   }
-  Future<void> check() async {setState(()=>busy=true);try{await sb.auth.refreshSession();if(mounted)setState((){});}finally{if(mounted)setState(()=>busy=false);}}
-  @override Widget build(BuildContext context)=>Scaffold(body:Center(child:Padding(padding:const EdgeInsets.all(28),child:ConstrainedBox(constraints:const BoxConstraints(maxWidth:480),child:Column(mainAxisSize:MainAxisSize.min,children:[const Icon(Icons.mark_email_unread_outlined,size:76),const SizedBox(height:18),Text('Verify your email',style:Theme.of(context).textTheme.headlineMedium),const SizedBox(height:12),Text("You're signed in, but you need to verify your email before you can use Purpa Messenger.\n\nWe sent a verification link to ${sb.auth.currentUser?.email ?? 'your email address'}.",textAlign:TextAlign.center),const SizedBox(height:22),FilledButton(onPressed:busy?null:check,child:const Text("I've verified my email — Check again")),TextButton(onPressed:busy||cooldown>0?null:resend,child:Text(cooldown>0?'Resend available in ${cooldown}s':'Resend verification email')),TextButton(onPressed:busy?null:()=>sb.auth.signOut(),child:const Text('Sign out'))])))));
+  Future<void> resend() async{
+    if(cooldown>0)return;setState(()=>busy=true);
+    try{
+      await sb.auth.resend(type:OtpType.signup,email:widget.email);
+      if(mounted){
+        snack('A new verification code was sent.');
+        setState(()=>cooldown=60);
+        timer=Timer.periodic(const Duration(seconds:1),(t){
+          if(!mounted)return;
+          if(cooldown<=1){t.cancel();setState(()=>cooldown=0);}else setState(()=>cooldown--);
+        });
+      }
+    }on AuthException catch(e){snack(e.message);}
+    finally{if(mounted)setState(()=>busy=false);}
+  }
+  @override Widget build(BuildContext context)=>Scaffold(
+    appBar:widget.signedInGate?null:AppBar(),
+    body:Center(child:SingleChildScrollView(padding:const EdgeInsets.all(28),child:ConstrainedBox(
+      constraints:const BoxConstraints(maxWidth:460),
+      child:Column(mainAxisSize:MainAxisSize.min,children:[
+        const Icon(Icons.password_rounded,size:68),
+        const SizedBox(height:16),
+        const Text('Verify your email',style:TextStyle(fontSize:26,fontWeight:FontWeight.bold)),
+        const SizedBox(height:10),
+        Text('Enter the verification code sent to ${widget.email}.',textAlign:TextAlign.center),
+        const SizedBox(height:22),
+        TextField(controller:code,keyboardType:TextInputType.number,maxLength:8,textAlign:TextAlign.center,
+          decoration:const InputDecoration(labelText:'Verification code',border:OutlineInputBorder()),
+          onSubmitted:(_)=>busy?null:verify()),
+        const SizedBox(height:8),
+        SizedBox(width:double.infinity,child:FilledButton(onPressed:busy?null:verify,child:Text(busy?'Checking…':'Verify'))),
+        TextButton(onPressed:busy||cooldown>0?null:resend,child:Text(cooldown>0?'Resend code in ${cooldown}s':'Resend code')),
+        if(widget.signedInGate)TextButton(onPressed:busy?null:()=>sb.auth.signOut(),child:const Text('Sign out')),
+      ]),
+    ))),
+  );
 }
 
 class ProfileGate extends StatefulWidget {
@@ -539,9 +703,12 @@ class _HomePageState extends State<HomePage> {
   bool _loading = true;
   String _chatFilter = 'all';
   Timer? _heartbeat;
+  Timer? _updateTimer;
 
   @override
   void initState() {
+    WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) checkForMessengerUpdate(context); });
+    _updateTimer = Timer.periodic(const Duration(hours: 6), (_) { if (mounted) checkForMessengerUpdate(context); });
     super.initState();
     _touchPresence();
     _heartbeat = Timer.periodic(const Duration(seconds: 45), (_) => _touchPresence());
@@ -550,6 +717,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    _updateTimer?.cancel();
     _heartbeat?.cancel();
     super.dispose();
   }
@@ -1311,6 +1479,37 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> _messageActions(Map<String,dynamic> m) async {
+    final me=sb.auth.currentUser?.id;
+    final mine=m['sender_id']==me;
+    final deleted=m['deleted_at']!=null;
+    final action=await showModalBottomSheet<String>(
+      context:context,
+      builder:(ctx)=>SafeArea(child:Wrap(children:[
+        ListTile(leading:const Icon(Icons.reply),title:const Text('Reply'),onTap:()=>Navigator.pop(ctx,'reply')),
+        if(!deleted)ListTile(leading:const Icon(Icons.copy),title:const Text('Copy'),onTap:()=>Navigator.pop(ctx,'copy')),
+        if(mine&&!deleted)ListTile(leading:const Icon(Icons.edit_outlined),title:const Text('Edit'),onTap:()=>Navigator.pop(ctx,'edit')),
+        if(!mine&&!deleted)ListTile(leading:const Icon(Icons.flag_outlined),title:const Text('Report'),onTap:()=>Navigator.pop(ctx,'report')),
+        if(mine&&!deleted)ListTile(leading:const Icon(Icons.delete_outline),title:const Text('Delete'),onTap:()=>Navigator.pop(ctx,'delete')),
+        ListTile(leading:const Icon(Icons.checklist),title:const Text('Select messages'),onTap:()=>Navigator.pop(ctx,'select')),
+      ])),
+    );
+    if(!mounted||action==null)return;
+    if(action=='reply'){setState(()=>_replyingTo=m);return;}
+    if(action=='copy'){await Clipboard.setData(ClipboardData(text:(m['body']??'').toString()));return;}
+    if(action=='edit'){setState((){_editing=m;_replyingTo=null;_input.text=(m['body']??'').toString();_input.selection=TextSelection.collapsed(offset:_input.text.length);});return;}
+    if(action=='report'){await _report(m);return;}
+    if(action=='select'){setState((){_selecting=true;_selected.add(m['id'].toString());});return;}
+    if(action=='delete'){
+      final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(
+        title:const Text('Delete message?'),
+        content:const Text('This message will be shown as deleted.'),
+        actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Delete'))],
+      ));
+      if(ok==true)await _deleteMessage(m);
+    }
+  }
+
   Future<void> _deleteMessage(Map<String, dynamic> m) async {
     await sb.from('messages').update({
       'body': 'Message deleted',
@@ -1545,7 +1744,7 @@ class _ChatPageState extends State<ChatPage> {
                           background: const Align(alignment:Alignment.centerLeft,child:Padding(padding:EdgeInsets.only(left:18),child:Icon(Icons.reply))),
                           child: GestureDetector(
                           onTap: _selecting ? () => setState(() {final id=m['id'].toString();if(!_selected.add(id))_selected.remove(id);if(_selected.isEmpty)_selecting=false;}) : null,
-                          onLongPress: () { if(_selecting){setState(()=>_selected.add(m['id'].toString()));}else{setState((){_selecting=true;_selected.add(m['id'].toString());});} },
+                          onLongPress: () { if(_selecting){setState(()=>_selected.add(m['id'].toString()));}else{_messageActions(m);} },
                           child: Container(
                             margin: const EdgeInsets.symmetric(vertical: 3),
                             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
@@ -1567,7 +1766,16 @@ class _ChatPageState extends State<ChatPage> {
                                   ),
                                 ),
                               if (!deleted && m['message_type']=='image' && m['attachment_path']!=null)
-                                FutureBuilder<String?>(future:_signedImage(m['attachment_path'].toString()),builder:(context,img)=>img.data==null?const SizedBox(width:180,height:120,child:Center(child:CircularProgressIndicator())):GestureDetector(onTap:()=>showDialog(context:context,builder:(_)=>Dialog(child:InteractiveViewer(child:Image.network(img.data!,fit:BoxFit.contain)))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.network(img.data!,width:260,fit:BoxFit.cover))),),
+                                FutureBuilder<String?>(future:_signedImage(m['attachment_path'].toString()),builder:(context,img)=>img.data==null?const SizedBox(width:180,height:120,child:Center(child:CircularProgressIndicator())):GestureDetector(onTap:()=>showDialog(context:context,barrierColor:Colors.black87,builder:(dialogContext)=>Dialog.fullscreen(backgroundColor:Colors.black,child:SafeArea(child:Stack(children:[
+                                  Positioned.fill(child:InteractiveViewer(
+                                    minScale:1,
+                                    maxScale:5,
+                                    boundaryMargin:const EdgeInsets.all(80),
+                                    clipBehavior:Clip.none,
+                                    child:Center(child:Image.network(img.data!,fit:BoxFit.contain,gaplessPlayback:true)),
+                                  )),
+                                  Positioned(top:8,right:8,child:IconButton(onPressed:()=>Navigator.pop(dialogContext),icon:const Icon(Icons.close,color:Colors.white))),
+                                ])))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.network(img.data!,width:260,fit:BoxFit.cover))),),
                               if ((m['body']??'').toString().isNotEmpty || deleted)
                                 Align(alignment:Alignment.centerLeft,child:Text(deleted?'Message deleted':(m['body']??'').toString(),style:deleted?const TextStyle(fontStyle:FontStyle.italic):null)),
                               if (rs.isNotEmpty)
@@ -1704,6 +1912,7 @@ class _SettingsPageState extends State<SettingsPage>{
       ListTile(leading:const Icon(Icons.logout_outlined),title:const Text('Log out from all sessions'),onTap:()async{final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(title:const Text('Log out everywhere?'),content:const Text('All active sessions for this account will be signed out.'),actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Log out'))]));if(ok==true)await sb.auth.signOut(scope:SignOutScope.global);}),
       const Divider(),
       const ListTile(title:Text('About',style:TextStyle(fontWeight:FontWeight.bold))),
+      ListTile(leading:const Icon(Icons.system_update_alt),title:const Text('Check for updates'),subtitle:Text('Current version $appVersion'),onTap:()=>checkForMessengerUpdate(context,manual:true)),
       const ListTile(title:Text('Purpa Messenger'),subtitle:Text('v0.5.2 QoL update')),
     ]),
   );
