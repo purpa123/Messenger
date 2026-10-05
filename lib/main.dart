@@ -22,8 +22,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 20;
-const appVersion = '0.7.4';
+const appBuildNumber = 21;
+const appVersion = '0.7.5';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -111,7 +111,7 @@ class E2eeService {
     await ensureDevice();
     final existing = await _loadConversationKey(conversationId);
     if (existing != null) {
-      await _distributeConversationKey(conversationId, existing);
+      try { await _distributeConversationKey(conversationId, existing); } catch (_) {}
       return existing;
     }
     final raw = _random(32);
@@ -141,11 +141,24 @@ class E2eeService {
       // Multiple async sends can try to distribute the same key at once. The
       // conversation/recipient/version tuple is unique, so make this idempotent
       // instead of surfacing a PostgreSQL duplicate-key error to the user.
-      await sb.from('e2ee_conversation_keys').upsert(
-        {'conversation_id':conversationId,'recipient_device_id':d['id'],'sender_device_id':_deviceRowId,'key_version':1,'wrapped_key':packed,'nonce':_b64(nonce)},
-        onConflict: 'conversation_id,recipient_device_id,key_version',
-        ignoreDuplicates: true,
-      );
+      // Server-side RPC re-validates sender device, membership and recipient
+      // device, then performs ON CONFLICT DO NOTHING. This avoids both the
+      // duplicate-key race and PostgREST/RLS upsert behaviour.
+      try {
+        await sb.rpc('store_e2ee_conversation_key', params:{
+          'p_conversation_id':conversationId,
+          'p_recipient_device_id':d['id'],
+          'p_sender_device_id':_deviceRowId,
+          'p_key_version':1,
+          'p_wrapped_key':packed,
+          'p_nonce':_b64(nonce),
+        });
+        have.add(d['id'].toString());
+      } catch (_) {
+        // A stale/revoked recipient device must not prevent sending to the
+        // remaining valid devices. Never expose raw database errors in chat UI.
+        continue;
+      }
     }
   }
 
@@ -197,7 +210,7 @@ class E2eeService {
 }
 
 
-Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, String expectedSha, int? expectedSize) async {
+Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, int buildNumber, String expectedSha, int? expectedSize) async {
   BuildContext? progressContext;
   double progress=0;
   bool cancelled=false;
@@ -215,15 +228,24 @@ Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, String exp
     )));
   });
   try{
-    final dir=await getTemporaryDirectory();
-    final file=File('${dir.path}/purpa-messenger-update.apk');
-    await Dio().downloadUri(uri,file.path,cancelToken:cancel,onReceiveProgress:(got,total){
+    final dir=await getApplicationSupportDirectory();
+    final file=File('${dir.path}/purpa-messenger-update-$buildNumber.apk');
+    bool cachedOk=await file.exists();
+    if(cachedOk && expectedSize!=null && expectedSize>0)cachedOk=await file.length()==expectedSize;
+    if(cachedOk && expectedSha.isNotEmpty){
+      final digest=sha256.convert(await file.readAsBytes()).toString();
+      cachedOk=digest.toLowerCase()==expectedSha.toLowerCase();
+    }
+    if(!cachedOk){
+      if(await file.exists())await file.delete();
+      await Dio().downloadUri(uri,file.path,cancelToken:cancel,onReceiveProgress:(got,total){
       if(total>0){progress=got/total;}
       if(progressContext!=null && progressContext!.mounted){
         // Rebuild dialog by notifying its route; progress text is secondary, system download still proceeds.
         (progressContext as Element).markNeedsBuild();
       }
-    });
+      });
+    }
     if(cancelled)return;
     if(expectedSize!=null && expectedSize>0 && await file.length()!=expectedSize)throw Exception('Downloaded APK size does not match release metadata.');
     if(expectedSha.isNotEmpty){
@@ -285,7 +307,7 @@ Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) 
                 ])));
                 if(choice=='manual'){await launchUrl(uri,mode:LaunchMode.externalApplication);return;}
                 if(choice=='auto'){
-                  await _downloadAndInstallUpdate(ctx,uri,(r['apk_sha256']??'').toString(),(r['apk_size_bytes'] as num?)?.toInt());
+                  await _downloadAndInstallUpdate(ctx,uri,remoteBuild,(r['apk_sha256']??'').toString(),(r['apk_size_bytes'] as num?)?.toInt());
                 }
               },
             ),
