@@ -22,8 +22,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 25;
-const appVersion = '0.8.0';
+const appBuildNumber = 27;
+const appVersion = '0.8.3';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -261,6 +261,27 @@ Future<void> _downloadAndInstallUpdate(BuildContext context, Uri uri, int buildN
   }
 }
 
+
+int _compareAppVersions(String a, String b) {
+  List<int> parts(String v) => v
+      .trim()
+      .replaceFirst(RegExp(r'^[vV]'), '')
+      .split(RegExp(r'[^0-9]+'))
+      .where((x) => x.isNotEmpty)
+      .map((x) => int.tryParse(x) ?? 0)
+      .toList();
+
+  final aa = parts(a);
+  final bb = parts(b);
+  final n = aa.length > bb.length ? aa.length : bb.length;
+  for (var i = 0; i < n; i++) {
+    final av = i < aa.length ? aa[i] : 0;
+    final bv = i < bb.length ? bb[i] : 0;
+    if (av != bv) return av.compareTo(bv);
+  }
+  return 0;
+}
+
 Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) async {
   try {
     final channel = devBuild ? 'dev' : 'stable';
@@ -271,7 +292,13 @@ Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) 
     }
     final r = Map<String,dynamic>.from(raw.first);
     final remoteBuild = (r['build_number'] as num?)?.toInt() ?? 0;
-    if (remoteBuild <= appBuildNumber) {
+    final remoteVersion = (r['version'] ?? '').toString();
+    final versionCmp = _compareAppVersions(remoteVersion, appVersion);
+
+    // Build numbers are primary. If builds are equal, compare app versions too.
+    final hasUpdate = remoteBuild > appBuildNumber ||
+        (remoteBuild == appBuildNumber && versionCmp > 0);
+    if (!hasUpdate) {
       if (manual && context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('You are up to date.')));
       return;
     }
@@ -1246,7 +1273,7 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) checkForMessengerUpdate(context); });
-    _updateTimer = Timer.periodic(const Duration(hours: 6), (_) { if (mounted) checkForMessengerUpdate(context); });
+    _updateTimer = Timer.periodic(const Duration(hours: 1), (_) { if (mounted) checkForMessengerUpdate(context); });
     super.initState();
     _touchPresence();
     _heartbeat = Timer.periodic(const Duration(seconds: 45), (_) => _touchPresence());
@@ -2570,7 +2597,7 @@ class _SettingsPageState extends State<SettingsPage>{
       const Divider(),
       const ListTile(title:Text('Security',style:TextStyle(fontWeight:FontWeight.bold))),
       ListTile(leading:const Icon(Icons.switch_account),title:const Text('Switch accounts'),subtitle:const Text('Use a saved login on this device'),onTap:()=>Navigator.push(context,MaterialPageRoute(builder:(_)=>const SwitchAccountsPage()))),
-      ListTile(leading:const Icon(Icons.logout),title:const Text('Log out from this device'),onTap:()async{await sb.auth.signOut();if(mounted)Navigator.pop(context);}),
+      ListTile(leading:const Icon(Icons.logout),title:const Text('Log out from this device'),onTap:()async{await sb.auth.signOut(scope:SignOutScope.local);if(mounted)Navigator.pop(context);}),
       ListTile(leading:const Icon(Icons.phonelink_erase),title:const Text('Log out from all other sessions'),onTap:()async{await sb.auth.signOut(scope:SignOutScope.others);if(mounted)ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content:Text('Other sessions signed out.')));}),
       ListTile(leading:const Icon(Icons.logout_outlined),title:const Text('Log out from all sessions'),onTap:()async{final ok=await showDialog<bool>(context:context,builder:(c)=>AlertDialog(title:const Text('Log out everywhere?'),content:const Text('All active sessions for this account will be signed out.'),actions:[TextButton(onPressed:()=>Navigator.pop(c,false),child:const Text('Cancel')),FilledButton(onPressed:()=>Navigator.pop(c,true),child:const Text('Log out'))]));if(ok==true)await sb.auth.signOut(scope:SignOutScope.global);}),
       const Divider(),
