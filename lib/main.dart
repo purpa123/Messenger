@@ -22,8 +22,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 23;
-const appVersion = '0.7.7';
+const appBuildNumber = 24;
+const appVersion = '0.7.8';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -1208,6 +1208,8 @@ class _HomePageState extends State<HomePage> {
   String _chatFilter = 'all';
   Timer? _heartbeat;
   Timer? _updateTimer;
+  Timer? _notificationTimer;
+  bool _checkingNotifications = false;
 
   Future<File?> _chatListCacheFile() async {
     final uid = sb.auth.currentUser?.id;
@@ -1247,13 +1249,62 @@ class _HomePageState extends State<HomePage> {
     _heartbeat = Timer.periodic(const Duration(seconds: 45), (_) => _touchPresence());
     _loadCachedChats();
     _loadChats();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkInAppNotifications());
+    _notificationTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkInAppNotifications());
   }
 
   @override
   void dispose() {
     _updateTimer?.cancel();
     _heartbeat?.cancel();
+    _notificationTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _checkInAppNotifications() async {
+    if (_checkingNotifications || !mounted) return;
+    final me = sb.auth.currentUser?.id;
+    if (me == null) return;
+    _checkingNotifications = true;
+    try {
+      final rows = await sb
+          .from('notifications')
+          .select('id,type,title,body,report_id,created_at,read_at')
+          .eq('user_id', me)
+          .isFilter('read_at', null)
+          .order('created_at', ascending: true)
+          .limit(10);
+      for (final raw in rows) {
+        if (!mounted) break;
+        final n = Map<String, dynamic>.from(raw);
+        await showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (dialogContext) => AlertDialog(
+            icon: Icon(
+              n['type'] == 'report_result' ? Icons.verified_user_outlined : Icons.notifications_outlined,
+            ),
+            title: Text((n['title'] ?? 'Purpa Messenger').toString()),
+            content: Text((n['body'] ?? '').toString()),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext).pop(),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+        try {
+          await sb.from('notifications').update({
+            'read_at': DateTime.now().toUtc().toIso8601String(),
+          }).eq('id', n['id']).eq('user_id', me);
+        } catch (_) {}
+      }
+    } catch (_) {
+      // In-app notifications must never block the inbox if the backend is unavailable.
+    } finally {
+      _checkingNotifications = false;
+    }
   }
 
   Future<void> _touchPresence() async {
