@@ -27,6 +27,20 @@ jobs:
         run: |
           if [ ! -d android ]; then flutter create --project-name=purpa_messenger --org=com.purpa --platforms=android .; fi
           cp google-services.json android/app/google-services.json
+          python3 -m pip install --quiet Pillow
+          python3 - <<'PYICON'
+          from PIL import Image
+          from pathlib import Path
+          im=Image.open('assets/app_icon.png').convert('RGBA')
+          sizes={'mipmap-mdpi':48,'mipmap-hdpi':72,'mipmap-xhdpi':96,'mipmap-xxhdpi':144,'mipmap-xxxhdpi':192}
+          root=Path('android/app/src/main/res')
+          for folder,size in sizes.items():
+              d=root/folder
+              d.mkdir(parents=True,exist_ok=True)
+              out=im.resize((size,size),Image.Resampling.LANCZOS)
+              out.save(d/'ic_launcher.png')
+              out.save(d/'ic_launcher_round.png')
+          PYICON
           python3 - <<'PY'
           from pathlib import Path
           p=Path('android/app/build.gradle.kts')
@@ -71,8 +85,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=messenger-dev" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.3-PROD-NO-IMAGES-DEV.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.3-PROD-NO-IMAGES-DEV" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.7.3-DEV.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.7.3-DEV" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=true" >> "$GITHUB_ENV"
           else
             test -n "$PROD_KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
@@ -84,8 +98,8 @@ jobs:
             echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
             echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.3-PROD-NO-IMAGES.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.3-PROD-NO-IMAGES" >> "$GITHUB_ENV"
+            echo "APK_NAME=Messenger-v0.7.3.apk" >> "$GITHUB_ENV"
+            echo "ARTIFACT_NAME=Messenger-v0.7.3" >> "$GITHUB_ENV"
             echo "DART_DEV_DEFINE=false" >> "$GITHUB_ENV"
           fi
 
