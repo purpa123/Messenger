@@ -1,155 +1,21 @@
-name: Build Android APK
-
+name: Check keystore digest
 on:
   workflow_dispatch:
-  push:
-    branches: [ main ]
-
 jobs:
-  build:
+  check:
     runs-on: ubuntu-latest
-    env:
-      # TEMPORARY: true = generate a fresh disposable signing key for this run.
-      # Set to false to require the permanent production signing secrets.
-      DEV_SIGNING: "false"
-      EXPECTED_CERT_SHA256: "470DC37B411811DE320C3A54FEC1FCCA27EFB8C938C653D1FF4522C5F55B90E7"
-
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.47.6"
-          channel: stable
-          cache: true
-
-      - name: Create Android platform files if missing
-        run: |
-          if [ ! -d android ]; then flutter create --project-name=purpa_messenger --org=com.purpa --platforms=android .; fi
-          cp google-services.json android/app/google-services.json
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('android/app/build.gradle.kts')
-          s=p.read_text()
-          s=s.replace('applicationId = "com.example.purpa_messenger"', 'applicationId = "com.purpa.purpa_messenger"')
-          s=s.replace('namespace = "com.example.purpa_messenger"', 'namespace = "com.purpa.purpa_messenger"')
-          if 'com.google.gms.google-services' not in s:
-              s=s.replace('plugins {', 'plugins {\n    id("com.google.gms.google-services") version "4.4.3"', 1)
-          s=s.replace('compileOptions {', 'compileOptions {\n        isCoreLibraryDesugaringEnabled = true', 1)
-          s += '\ndependencies {\n    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")\n}\n'
-          p.write_text(s)
-          manifest=Path('android/app/src/main/AndroidManifest.xml')
-          m=manifest.read_text()
-          permissions='<uses-permission android:name="android.permission.INTERNET"/><uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>'
-          m=m.replace('<application', permissions+'\n    <application',1).replace('android:label="purpa_messenger"','android:label="Messenger"')
-          m=m.replace('</application>', '<meta-data android:name="com.google.firebase.messaging.default_notification_channel_id" android:value="messages"/></application>')
-          manifest.write_text(m)
-          Path('test/widget_test.dart').unlink(missing_ok=True)
-          Path('README.md').unlink(missing_ok=True)
-          PY
-
-      - name: Prepare signing key
+      - name: Decode and hash keystore
         env:
-          PROD_KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          PROD_KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          PROD_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          PROD_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
-          set -euo pipefail
-          if [ "$DEV_SIGNING" = "true" ]; then
-            echo "DEV signing enabled: generating disposable keystore"
-            DEV_PASS="$(openssl rand -hex 24)"
-            echo "::add-mask::$DEV_PASS"
-            keytool -genkeypair -noprompt \
-              -keystore android/app/messenger-release.jks \
-              -storetype PKCS12 \
-              -storepass "$DEV_PASS" \
-              -keypass "$DEV_PASS" \
-              -alias messenger-dev \
-              -keyalg RSA -keysize 2048 -validity 30 \
-              -dname "CN=Messenger DEV, OU=Development, O=EST Team, L=Dev, ST=Dev, C=US"
-            echo "SIGN_STORE_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_PASSWORD=$DEV_PASS" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_ALIAS=messenger-dev" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.3-PROD-NO-IMAGES-DEV.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.3-PROD-NO-IMAGES-DEV" >> "$GITHUB_ENV"
-            echo "DART_DEV_DEFINE=true" >> "$GITHUB_ENV"
-          else
-            test -n "$PROD_KEYSTORE_BASE64" || { echo "KEYSTORE_BASE64 is missing"; exit 1; }
-            test -n "$PROD_KEYSTORE_PASSWORD" || { echo "KEYSTORE_PASSWORD is missing"; exit 1; }
-            test -n "$PROD_KEY_ALIAS" || { echo "KEY_ALIAS is missing"; exit 1; }
-            test -n "$PROD_KEY_PASSWORD" || { echo "KEY_PASSWORD is missing"; exit 1; }
-            printf '%s' "$PROD_KEYSTORE_BASE64" | base64 --decode > android/app/messenger-release.jks
-            keytool -list -keystore android/app/messenger-release.jks -storepass:env PROD_KEYSTORE_PASSWORD -alias "$PROD_KEY_ALIAS"
-            echo "SIGN_STORE_PASSWORD=$PROD_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_PASSWORD=$PROD_KEY_PASSWORD" >> "$GITHUB_ENV"
-            echo "SIGN_KEY_ALIAS=$PROD_KEY_ALIAS" >> "$GITHUB_ENV"
-            echo "APK_NAME=Messenger-v0.7.3-PROD-NO-IMAGES.apk" >> "$GITHUB_ENV"
-            echo "ARTIFACT_NAME=Messenger-v0.7.3-PROD-NO-IMAGES" >> "$GITHUB_ENV"
-            echo "DART_DEV_DEFINE=false" >> "$GITHUB_ENV"
-          fi
-
-      - name: Configure release signing
-        run: |
-          set -euo pipefail
-          cat > android/key.properties <<EOF2
-          storePassword=$SIGN_STORE_PASSWORD
-          keyPassword=$SIGN_KEY_PASSWORD
-          keyAlias=$SIGN_KEY_ALIAS
-          storeFile=messenger-release.jks
-          EOF2
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('android/app/build.gradle.kts')
-          s = p.read_text()
-          if 'create("releaseMessenger")' not in s:
-              marker = 'android {'
-              insert = '''android {\n    signingConfigs {\n        create("releaseMessenger") {\n            storeFile = file("messenger-release.jks")\n            storePassword = System.getenv("SIGN_STORE_PASSWORD")\n            keyAlias = System.getenv("SIGN_KEY_ALIAS")\n            keyPassword = System.getenv("SIGN_KEY_PASSWORD")\n        }\n    }'''
-              s = s.replace(marker, insert, 1)
-          s = s.replace('signingConfig = signingConfigs.getByName("debug")', 'signingConfig = signingConfigs.getByName("releaseMessenger")')
-          p.write_text(s)
-          PY
-
-      - run: flutter pub get
-      - run: flutter analyze --no-fatal-infos
-
-      - name: Enable in-app APK updater
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path("android/app/src/main/AndroidManifest.xml")
-          s=p.read_text()
-          perm='<uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>'
-          if perm not in s:
-              s=s.replace("<manifest", "<manifest", 1)
-              i=s.find(">", s.find("<manifest"))+1
-              s=s[:i]+"\n    "+perm+s[i:]
-          p.write_text(s)
-          PY
-
-      - name: Build APK
-        run: flutter build apk --release --dart-define=DEV_BUILD=$DART_DEV_DEFINE
-
-      - name: Verify APK certificate
-        run: |
-          set -euo pipefail
-          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)
-          test -n "$APKSIGNER" || { echo "apksigner not found"; exit 1; }
-          "$APKSIGNER" verify --verbose --print-certs build/app/outputs/flutter-apk/app-release.apk | tee cert.txt
-          ACTUAL=$(awk '/certificate SHA-256 digest:/ {print toupper($NF); found=1; exit} END {if (!found) exit 1}' cert.txt)
-          [[ "$ACTUAL" =~ ^[0-9A-F]{64}$ ]] || { echo "Invalid certificate fingerprint output"; exit 1; }
-          echo "Actual certificate SHA-256: $ACTUAL"
-          if [ "$DEV_SIGNING" = "false" ]; then
-            echo "Expected production SHA-256: $EXPECTED_CERT_SHA256"
-            test "$ACTUAL" = "$EXPECTED_CERT_SHA256" || { echo "ERROR: APK was signed with the wrong production certificate"; exit 1; }
-          else
-            echo "DEV build: disposable certificate accepted. This fingerprint is NOT a production identity."
-          fi
-
-      - name: Rename APK
-        run: cp build/app/outputs/flutter-apk/app-release.apk "$APK_NAME"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: ${{ env.APK_NAME }}
+          python3 - <<'PYCODE'
+          import os,base64,hashlib
+          value=''.join(os.environ['KEYSTORE_BASE64'].split())
+          try:
+              data=base64.b64decode(value,validate=True)
+          except Exception:
+              raise SystemExit('KEYSTORE_BASE64 is not valid Base64')
+          print('Decoded keystore bytes: '+str(len(data)))
+          print('Decoded keystore SHA-256: '+hashlib.sha256(data).hexdigest())
+          PYCODE
