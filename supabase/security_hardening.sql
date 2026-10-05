@@ -112,3 +112,6 @@ revoke truncate on public.app_releases,public.conversation_members,public.conver
 revoke select,update on public.e2ee_devices from authenticated;
 grant select(id,user_id,device_id,identity_public_key,encryption_public_key,revoked_at) on public.e2ee_devices to authenticated;
 grant update(last_seen_at,revoked_at,identity_public_key,encryption_public_key) on public.e2ee_devices to authenticated;
+
+-- Preserve legacy own-profile reads under the id=auth.uid() SELECT policy.
+grant select on public.profiles to authenticated;
