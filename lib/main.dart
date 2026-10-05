@@ -4,7 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:dio/dio.dart';
-import 'package:crypto/crypto.dart';
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:path_provider/path_provider.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:flutter/material.dart';
@@ -38,7 +38,6 @@ class E2eeService {
   static final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static final _rng = Random.secure();
   static String? _deviceRowId;
-  static String? _deviceId;
   static SimpleKeyPairData? _deviceKeyPair;
 
   static List<int> _random(int n) => List<int>.generate(n, (_) => _rng.nextInt(256));
@@ -55,7 +54,6 @@ class E2eeService {
       did = '${DateTime.now().microsecondsSinceEpoch}-${_b64(_random(12))}';
       await _storage.write(key: 'e2ee.device_id', value: did);
     }
-    _deviceId = did;
 
     final privSaved = await _storage.read(key: 'e2ee.x25519.private');
     final pubSaved = await _storage.read(key: 'e2ee.x25519.public');
@@ -1599,7 +1597,7 @@ class _ChatPageState extends State<ChatPage> {
       final mime=ext=='png'?'image/png':ext=='webp'?'image/webp':'image/jpeg';
       final encryptedPhoto=await E2eeService.encryptAttachment(widget.conversationId,bytes);
       final path='${widget.conversationId}/${DateTime.now().microsecondsSinceEpoch}_${me.id}.e2ee';
-      await sb.storage.from('message-images').uploadBinary(path,encryptedPhoto['bytes'] as List<int>,fileOptions:const FileOptions(contentType:'application/octet-stream',upsert:false));
+      await sb.storage.from('message-images').uploadBinary(path,Uint8List.fromList(encryptedPhoto['bytes'] as List<int>),fileOptions:const FileOptions(contentType:'application/octet-stream',upsert:false));
       final caption=_input.text.trim();
       final captionFields=caption.isEmpty ? <String,dynamic>{'body':''} : await E2eeService.encryptText(widget.conversationId,caption);
       final insertedPhoto = await sb.from('messages').insert({
@@ -1990,7 +1988,7 @@ class _ChatPageState extends State<ChatPage> {
                                     child:Center(child:Image.memory(img.data!,fit:BoxFit.contain,gaplessPlayback:true)),
                                   )),
                                   Positioned(top:8,right:8,child:IconButton(onPressed:()=>Navigator.pop(dialogContext),icon:const Icon(Icons.close,color:Colors.white))),
-                                ])))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.memory(img.data!,width:260,fit:BoxFit.cover,gaplessPlayback:true))),)),
+                                ])))),child:ClipRRect(borderRadius:BorderRadius.circular(12),child:Image.memory(img.data!,width:260,fit:BoxFit.cover,gaplessPlayback:true))),),
                               if ((m['body']??'').toString().isNotEmpty || deleted)
                                 Align(alignment:Alignment.centerLeft,child:Text(deleted?'Message deleted':(m['body']??'').toString(),style:deleted?const TextStyle(fontStyle:FontStyle.italic):null)),
                               if (rs.isNotEmpty)
