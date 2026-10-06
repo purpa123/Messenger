@@ -113,7 +113,7 @@ class E2eeService {
       .eq('conversation_id',conversationId)
       .eq('recipient_device_id',_deviceRowId!)
       .eq('key_version',keyVersion);
-    if(legacySenderScoped)q=q.eq('sender_device_id',senderDeviceId!);
+    if(legacySenderScoped)q=q.eq('sender_device_id',senderDeviceId);
     final row=await q.order('created_at',ascending:false).limit(1).maybeSingle();
     if(row==null)return null;
 
