@@ -23,8 +23,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 35;
-const appVersion = '0.9.1';
+const appBuildNumber = 36;
+const appVersion = '0.9.2';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -580,8 +580,7 @@ class _SwitchAccountsPageState extends State<SwitchAccountsPage> {
     }
     setState(()=>_switching=email);
     try{
-      // Sign out locally only. Other sessions/devices remain signed in.
-      await sb.auth.signOut(scope:SignOutScope.local);
+      // Authenticate before replacing the current session.
       await sb.auth.signInWithPassword(email:email,password:password);
       if(mounted) Navigator.of(context).popUntil((r)=>r.isFirst);
     }on AuthException catch(e){
@@ -617,7 +616,6 @@ class _SwitchAccountsPageState extends State<SwitchAccountsPage> {
     );
     if(password==null || password.isEmpty)return;
     try{
-      await sb.auth.signOut(scope:SignOutScope.local);
       await sb.auth.signInWithPassword(email:email,password:password);
       await SavedAccounts.save(email,password);
       if(mounted)Navigator.of(context).popUntil((r)=>r.isFirst);
@@ -626,11 +624,76 @@ class _SwitchAccountsPageState extends State<SwitchAccountsPage> {
     }
   }
 
+  Future<void> _addAccount() async {
+    final emailController=TextEditingController();
+    final passwordController=TextEditingController();
+    final credentials=await showDialog<List<String>>(
+      context:context,
+      builder:(d)=>AlertDialog(
+        title:const Text('Add account'),
+        content:Column(mainAxisSize:MainAxisSize.min,children:[
+          TextField(
+            controller:emailController,
+            keyboardType:TextInputType.emailAddress,
+            autocorrect:false,
+            decoration:const InputDecoration(labelText:'Email',border:OutlineInputBorder()),
+          ),
+          const SizedBox(height:12),
+          TextField(
+            controller:passwordController,
+            obscureText:true,
+            enableSuggestions:false,
+            autocorrect:false,
+            decoration:const InputDecoration(labelText:'Password',border:OutlineInputBorder()),
+          ),
+        ]),
+        actions:[
+          TextButton(onPressed:()=>Navigator.pop(d),child:const Text('Cancel')),
+          FilledButton(
+            onPressed:()=>Navigator.pop(d,[emailController.text.trim(),passwordController.text]),
+            child:const Text('Add account'),
+          ),
+        ],
+      ),
+    );
+    emailController.dispose();
+    passwordController.dispose();
+    if(credentials==null || credentials.length!=2)return;
+    final email=credentials[0].trim();
+    final password=credentials[1];
+    if(email.isEmpty || password.isEmpty)return;
+
+    setState(()=>_switching=email);
+    try{
+      // Do not sign out first: a failed login must not destroy the current session.
+      await sb.auth.signInWithPassword(email:email,password:password);
+      await SavedAccounts.save(email,password);
+      await _load();
+      if(mounted)Navigator.of(context).popUntil((r)=>r.isFirst);
+    }on AuthException catch(e){
+      if(mounted)ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content:Text('Could not add account: ${e.message}')),
+      );
+    }finally{
+      if(mounted)setState(()=>_switching=null);
+    }
+  }
+
   @override Widget build(BuildContext context)=>Scaffold(
     appBar:AppBar(title:const Text('Switch accounts')),
     body:_loading?const Center(child:CircularProgressIndicator()):ListView(
       padding:const EdgeInsets.all(12),
       children:[
+        Card(
+          child:ListTile(
+            leading:const CircleAvatar(child:Icon(Icons.person_add_alt_1)),
+            title:const Text('Add account'),
+            subtitle:const Text('Sign in to another account on this device'),
+            trailing:const Icon(Icons.chevron_right),
+            onTap:_switching==null?_addAccount:null,
+          ),
+        ),
+        const SizedBox(height:4),
         if(_emails.isEmpty) const ListTile(
           leading:Icon(Icons.person_off_outlined),
           title:Text('No saved accounts'),
