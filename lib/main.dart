@@ -23,8 +23,8 @@ const supabaseUrl = 'https://vepgxpgasbkrloaaxgvh.supabase.co';
 const supabasePublishableKey = 'sb_publishable_dIP2ZG4M85bRh771f4mh9A_DuSyGub4';
 const devBuild = false;
 
-const appBuildNumber = 31;
-const appVersion = '0.8.7';
+const appBuildNumber = 35;
+const appVersion = '0.9.1';
 
 
 /// Purpa Messenger E2EE v1 (text messages).
@@ -38,6 +38,7 @@ class E2eeService {
   static final _hkdf = Hkdf(hmac: Hmac.sha256(), outputLength: 32);
   static final _rng = Random.secure();
   static String? _deviceRowId;
+  static String? _deviceUserId;
   static SimpleKeyPairData? _deviceKeyPair;
 
   static List<int> _random(int n) => List<int>.generate(n, (_) => _rng.nextInt(256));
@@ -47,13 +48,16 @@ class E2eeService {
   static Future<void> ensureDevice() async {
     final user = sb.auth.currentUser;
     if (user == null) throw StateError('Not signed in');
-    if (_deviceRowId != null && _deviceKeyPair != null) return;
+    if (_deviceUserId == user.id && _deviceRowId != null && _deviceKeyPair != null) return;
+    _deviceRowId = null;
+    _deviceUserId = user.id;
 
     var did = await _storage.read(key: 'e2ee.device_id');
     if (did == null) {
       did = '${DateTime.now().microsecondsSinceEpoch}-${_b64(_random(12))}';
       await _storage.write(key: 'e2ee.device_id', value: did);
     }
+
 
     final privSaved = await _storage.read(key: 'e2ee.x25519.private');
     final pubSaved = await _storage.read(key: 'e2ee.x25519.public');
@@ -91,115 +95,129 @@ class E2eeService {
     return _hkdf.deriveKey(secretKey: shared, nonce: utf8.encode(conversationId), info: utf8.encode('purpa-messenger-e2ee-wrap-v1'));
   }
 
-  static Future<SecretKey?> _loadConversationKey(String conversationId) async {
-    final cached = await _storage.read(key: 'e2ee.conv.$conversationId.v1');
-    if (cached != null) return SecretKey(_unb64(cached));
+  static Future<SecretKey?> _loadConversationKey(
+    String conversationId, {
+    int keyVersion = 1,
+    String? senderDeviceId,
+  }) async {
     await ensureDevice();
-    final row = await sb.from('e2ee_conversation_keys').select('wrapped_key,nonce,sender_device_id')
-        .eq('conversation_id', conversationId).eq('recipient_device_id', _deviceRowId!).eq('key_version', 1).maybeSingle();
-    if (row == null) return null;
-    final sender = await sb.from('e2ee_devices').select('encryption_public_key').eq('id', row['sender_device_id']).maybeSingle();
-    if (sender == null) return null;
-    final wrapKey = await _wrapKeyFor(SimplePublicKey(_unb64(sender['encryption_public_key'].toString()), type: KeyPairType.x25519), conversationId);
-    final packed = jsonDecode(utf8.decode(_unb64(row['wrapped_key'].toString()))) as Map<String,dynamic>;
-    final box = SecretBox(_unb64(packed['c'].toString()), nonce: _unb64(row['nonce'].toString()), mac: Mac(_unb64(packed['m'].toString())));
-    final raw = await _aes.decrypt(box, secretKey: wrapKey);
-    await _storage.write(key: 'e2ee.conv.$conversationId.v1', value: _b64(raw));
+    final legacySenderScoped = keyVersion == 1 && senderDeviceId != null && senderDeviceId.isNotEmpty;
+    final cacheKey = legacySenderScoped
+        ? 'e2ee.conv.$conversationId.v1.sender.$senderDeviceId'
+        : 'e2ee.conv.$conversationId.v$keyVersion';
+    final cached=await _storage.read(key:cacheKey);
+    if(cached!=null)return SecretKey(_unb64(cached));
+
+    var q=sb.from('e2ee_conversation_keys')
+      .select('wrapped_key,nonce,sender_device_id')
+      .eq('conversation_id',conversationId)
+      .eq('recipient_device_id',_deviceRowId!)
+      .eq('key_version',keyVersion);
+    if(legacySenderScoped)q=q.eq('sender_device_id',senderDeviceId!);
+    final row=await q.order('created_at',ascending:false).limit(1).maybeSingle();
+    if(row==null)return null;
+
+    final senderId=row['sender_device_id'].toString();
+    final sender=await sb.from('e2ee_devices').select('encryption_public_key').eq('id',senderId).maybeSingle();
+    if(sender==null)return null;
+    final wrapKey=await _wrapKeyFor(SimplePublicKey(_unb64(sender['encryption_public_key'].toString()),type:KeyPairType.x25519),conversationId);
+    final packed=jsonDecode(utf8.decode(_unb64(row['wrapped_key'].toString()))) as Map<String,dynamic>;
+    final box=SecretBox(_unb64(packed['c'].toString()),nonce:_unb64(row['nonce'].toString()),mac:Mac(_unb64(packed['m'].toString())));
+    final raw=await _aes.decrypt(box,secretKey:wrapKey);
+    await _storage.write(key:cacheKey,value:_b64(raw));
     return SecretKey(raw);
   }
 
-  static Future<SecretKey> ensureConversationKey(String conversationId) async {
+  // New sends use a server-allocated conversation key version. A key is
+  // generated once for that version and wrapped separately for every device.
+  static Future<Map<String,dynamic>> _createConversationKey(String conversationId) async {
     await ensureDevice();
-    final existing = await _loadConversationKey(conversationId);
-    if (existing != null) {
-      try { await _distributeConversationKey(conversationId, existing); } catch (_) {}
-      return existing;
-    }
-    final raw = _random(32);
-    final key = SecretKey(raw);
-    await _storage.write(key: 'e2ee.conv.$conversationId.v1', value: _b64(raw));
-    await _distributeConversationKey(conversationId, key);
-    return key;
+    final allocated=await sb.rpc('allocate_e2ee_key_version',params:{'p_conversation_id':conversationId});
+    final keyVersion=(allocated as num).toInt();
+    final raw=_random(32);
+    final key=SecretKey(raw);
+    await _storage.write(key:'e2ee.conv.$conversationId.v$keyVersion',value:_b64(raw));
+    await _distributeConversationKey(conversationId,key,keyVersion);
+    return {'key':key,'version':keyVersion};
   }
 
-  static Future<void> _distributeConversationKey(String conversationId, SecretKey key) async {
+  static Future<void> _distributeConversationKey(String conversationId, SecretKey key, int keyVersion) async {
     await ensureDevice();
     final raw=await key.extractBytes();
-    final members=await sb.rpc('get_conversation_member_ids', params: {'target_conversation': conversationId});
+    final members=await sb.rpc('get_conversation_member_ids',params:{'target_conversation':conversationId});
     final memberIds=members.map((x)=>x['user_id'].toString()).toList();
     if(memberIds.isEmpty)throw StateError('No conversation members');
     final devices=await sb.from('e2ee_devices').select('id,user_id,encryption_public_key').inFilter('user_id',memberIds).isFilter('revoked_at',null);
     if(!devices.any((d)=>d['id'].toString()==_deviceRowId))throw StateError('Current E2EE device missing');
-    final existing=await sb.from('e2ee_conversation_keys').select('recipient_device_id').eq('conversation_id',conversationId).eq('key_version',1);
-    final have=existing.map((x)=>x['recipient_device_id'].toString()).toSet();
+
     for(final d in devices){
-      if(have.contains(d['id'].toString()))continue;
       final recipient=SimplePublicKey(_unb64(d['encryption_public_key'].toString()),type:KeyPairType.x25519);
       final wrapKey=await _wrapKeyFor(recipient,conversationId);
       final nonce=_random(12);
       final box=await _aes.encrypt(raw,secretKey:wrapKey,nonce:nonce);
       final packed=_b64(utf8.encode(jsonEncode({'c':_b64(box.cipherText),'m':_b64(box.mac.bytes)})));
-      // Multiple async sends can try to distribute the same key at once. The
-      // conversation/recipient/version tuple is unique, so make this idempotent
-      // instead of surfacing a PostgreSQL duplicate-key error to the user.
-      // Server-side RPC re-validates sender device, membership and recipient
-      // device, then performs ON CONFLICT DO NOTHING. This avoids both the
-      // duplicate-key race and PostgREST/RLS upsert behaviour.
-      try {
-        await sb.rpc('store_e2ee_conversation_key', params:{
-          'p_conversation_id':conversationId,
-          'p_recipient_device_id':d['id'],
-          'p_sender_device_id':_deviceRowId,
-          'p_key_version':1,
-          'p_wrapped_key':packed,
-          'p_nonce':_b64(nonce),
-        });
-        have.add(d['id'].toString());
-      } catch (_) {
-        // A stale/revoked recipient device must not prevent sending to the
-        // remaining valid devices. Never expose raw database errors in chat UI.
-        continue;
-      }
+      await sb.rpc('store_e2ee_conversation_key',params:{
+        'p_conversation_id':conversationId,
+        'p_recipient_device_id':d['id'],
+        'p_sender_device_id':_deviceRowId,
+        'p_key_version':keyVersion,
+        'p_wrapped_key':packed,
+        'p_nonce':_b64(nonce),
+      });
     }
   }
 
   static Future<Map<String,dynamic>> encryptText(String conversationId, String plaintext) async {
-    final key = await ensureConversationKey(conversationId);
-    final nonce = _random(12);
-    final box = await _aes.encrypt(utf8.encode(plaintext), secretKey:key, nonce:nonce);
+    final created=await _createConversationKey(conversationId);
+    final key=created['key'] as SecretKey;
+    final keyVersion=created['version'] as int;
+    final nonce=_random(12);
+    final box=await _aes.encrypt(utf8.encode(plaintext),secretKey:key,nonce:nonce);
     return {
       'body':'🔒 Encrypted message',
       'encryption_version':1,
       'ciphertext':_b64(utf8.encode(jsonEncode({'c':_b64(box.cipherText),'m':_b64(box.mac.bytes)}))),
       'encryption_nonce':_b64(nonce),
       'sender_device_id':_deviceRowId,
-      'key_version':1,
+      'key_version':keyVersion,
     };
   }
 
   static Future<Map<String,dynamic>> encryptAttachment(String conversationId, List<int> plaintext) async {
-    final key = await ensureConversationKey(conversationId);
-    final nonce = _random(12);
-    final box = await _aes.encrypt(plaintext, secretKey:key, nonce:nonce);
+    final created=await _createConversationKey(conversationId);
+    final key=created['key'] as SecretKey;
+    final keyVersion=created['version'] as int;
+    final nonce=_random(12);
+    final box=await _aes.encrypt(plaintext,secretKey:key,nonce:nonce);
     return {
-      'bytes': box.cipherText,
-      'nonce': _b64(nonce),
-      'mac': _b64(box.mac.bytes),
-      'version': 1,
+      'bytes':box.cipherText,
+      'nonce':_b64(nonce),
+      'mac':_b64(box.mac.bytes),
+      'version':1,
+      'key_version':keyVersion,
+      'sender_device_id':_deviceRowId,
     };
   }
 
-  static Future<List<int>> decryptAttachment(String conversationId, List<int> ciphertext, String nonce, String mac) async {
-    final key = await _loadConversationKey(conversationId);
-    if (key == null) throw StateError('E2EE key unavailable');
-    return _aes.decrypt(SecretBox(ciphertext, nonce:_unb64(nonce), mac:Mac(_unb64(mac))), secretKey:key);
+  static Future<List<int>> decryptAttachment(
+    String conversationId,List<int> ciphertext,String nonce,String mac, {
+    int keyVersion=1,
+    String? senderDeviceId,
+  }) async {
+    final key=await _loadConversationKey(conversationId,keyVersion:keyVersion,senderDeviceId:senderDeviceId);
+    if(key==null)throw StateError('E2EE key unavailable');
+    return _aes.decrypt(SecretBox(ciphertext,nonce:_unb64(nonce),mac:Mac(_unb64(mac))),secretKey:key);
   }
 
   static Future<Map<String,dynamic>> decryptMessage(Map<String,dynamic> original) async {
     final m=Map<String,dynamic>.from(original);
     if (m['encryption_version'] != 1 || m['ciphertext']==null || m['encryption_nonce']==null) return m;
     try {
-      final key=await _loadConversationKey(m['conversation_id'].toString());
+      final key=await _loadConversationKey(
+        m['conversation_id'].toString(),
+        keyVersion:(m['key_version'] as num?)?.toInt() ?? 1,
+        senderDeviceId:m['sender_device_id']?.toString(),
+      );
       if(key==null){m['body']='🔒 Encrypted message — key unavailable';return m;}
       final packed=jsonDecode(utf8.decode(_unb64(m['ciphertext'].toString()))) as Map<String,dynamic>;
       final box=SecretBox(_unb64(packed['c'].toString()),nonce:_unb64(m['encryption_nonce'].toString()),mac:Mac(_unb64(packed['m'].toString())));
@@ -296,7 +314,8 @@ Future<void> checkForMessengerUpdate(BuildContext context, {bool manual=false}) 
     final remoteVersion = (r['version'] ?? '').toString();
     final versionCmp = _compareAppVersions(remoteVersion, appVersion);
 
-    // Build numbers are primary. If builds are equal, compare app versions too.
+    // Build numbers are primary, but older releases accidentally reused build 24
+    // for both 0.7.8 and 0.8.0. If builds are equal, compare app versions too.
     final hasUpdate = remoteBuild > appBuildNumber ||
         (remoteBuild == appBuildNumber && versionCmp > 0);
     if (!hasUpdate) {
@@ -389,8 +408,10 @@ Future<void> openPushConversation(RemoteMessage message) async {
     final high = c['dm_user_high']?.toString();
     final other = low == me ? high : low;
     if (other == null) return;
-    final profileRows = await sb.rpc('get_profile_privacy', params: {'target_id': other});
-    final profile = (profileRows as List).isEmpty ? null : Map<String,dynamic>.from(profileRows.first);
+    final profile = await sb.from('profiles')
+        .select('username,display_name')
+        .eq('id', other)
+        .maybeSingle();
     final title = (profile?['display_name'] ?? profile?['username'] ?? 'Chat').toString();
     final ctx = navigatorKey.currentContext;
     if (ctx != null) {
@@ -974,8 +995,11 @@ class _ProfileGateState extends State<ProfileGate> with WidgetsBindingObserver {
     if (user == null) return;
 
     try {
-      final profileRows = await sb.rpc('get_my_profile_private');
-      final profile = (profileRows as List).isEmpty ? null : Map<String,dynamic>.from(profileRows.first);
+      final profile = await sb
+          .from('profiles')
+          .select('id,suspended_until,moderation_reason,muted_until,mute_reason')
+          .eq('id', user.id)
+          .maybeSingle();
       List<Map<String, dynamic>> notices = [];
       if (profile != null) {
         try {
@@ -1673,7 +1697,10 @@ class _SearchPageState extends State<SearchPage> {
           conversationId = existing['id'] as String;
         }
 
-        final existingMembership = await sb.rpc('get_conversation_member_ids', params: {'target_conversation': conversationId});
+        final existingMembership = await sb
+            .from('conversation_members')
+            .select('user_id')
+            .eq('conversation_id', conversationId);
         final memberIds = existingMembership.map((row) => row['user_id'] as String).toSet();
         final missing = <Map<String, dynamic>>[];
         if (!memberIds.contains(me)) missing.add({'conversation_id': conversationId, 'user_id': me});
@@ -1903,8 +1930,7 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _loadChatPreferences() async {
     final me=sb.auth.currentUser?.id; if(me==null)return;
     try {
-      final ownRows=await sb.rpc('get_my_profile_private');
-      final row=(ownRows as List).isEmpty ? null : Map<String,dynamic>.from(ownRows.first);
+      final row=await sb.from('profiles').select('read_receipts_enabled').eq('id',me).maybeSingle();
       if(mounted)setState(()=>_readReceiptsEnabled=row?['read_receipts_enabled']!=false);
     } catch(_){}
   }
@@ -1962,8 +1988,8 @@ class _ChatPageState extends State<ChatPage> {
     final me = sb.auth.currentUser?.id;
     if (me == null) return;
     try {
-      final allRows = await sb.rpc('get_conversation_receipts', params: {'target_conversation': widget.conversationId});
-      final rows = (allRows as List).where((row) => row['user_id'] != me).toList();
+      final allRows = await sb.rpc('get_conversation_receipts',params:{'target_conversation':widget.conversationId});
+      final rows = (allRows as List).where((r)=>r['user_id']!=me).toList();
       if (rows.isNotEmpty && mounted) {
         final d = rows.first['delivered_at'] as String?;
         final r = rows.first['last_read_at'] as String?;
@@ -2081,7 +2107,14 @@ class _ChatPageState extends State<ChatPage> {
       final path=m['attachment_path']?.toString(); if(path==null)return null;
       if(m['attachment_encryption_version']==1 && m['attachment_nonce']!=null && m['attachment_mac']!=null){
         final cipher=await sb.storage.from('message-images').download(path);
-        final plain=await E2eeService.decryptAttachment(widget.conversationId,cipher,m['attachment_nonce'].toString(),m['attachment_mac'].toString());
+        final plain=await E2eeService.decryptAttachment(
+          widget.conversationId,
+          cipher,
+          m['attachment_nonce'].toString(),
+          m['attachment_mac'].toString(),
+          keyVersion:(m['key_version'] as num?)?.toInt() ?? 1,
+          senderDeviceId:m['sender_device_id']?.toString(),
+        );
         return Uint8List.fromList(plain);
       }
       final legacy=await sb.storage.from('message-images').download(path);
