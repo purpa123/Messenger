@@ -199,29 +199,41 @@ class E2eeService {
     };
   }
 
+  // Legacy keys were sometimes shared by several sender devices. Only an
+  // authenticated AES-GCM decrypt may accept the old unscoped cache fallback.
+  static Future<List<int>> _decryptBox(String conversationId, SecretBox box, {
+    int keyVersion=1, String? senderDeviceId,
+  }) async {
+    for (final sender in keyVersion==1 && senderDeviceId!=null
+        ? <String?>[senderDeviceId,null] : <String?>[senderDeviceId]) {
+      try {
+        final key=await _loadConversationKey(conversationId,
+            keyVersion:keyVersion,senderDeviceId:sender);
+        if(key!=null)return await _aes.decrypt(box,secretKey:key);
+      } catch (_) { /* Try the preserved legacy key without accepting plaintext. */ }
+    }
+    throw StateError('E2EE key unavailable or authentication failed');
+  }
+
   static Future<List<int>> decryptAttachment(
     String conversationId,List<int> ciphertext,String nonce,String mac, {
     int keyVersion=1,
     String? senderDeviceId,
   }) async {
-    final key=await _loadConversationKey(conversationId,keyVersion:keyVersion,senderDeviceId:senderDeviceId);
-    if(key==null)throw StateError('E2EE key unavailable');
-    return _aes.decrypt(SecretBox(ciphertext,nonce:_unb64(nonce),mac:Mac(_unb64(mac))),secretKey:key);
+    return _decryptBox(conversationId,
+        SecretBox(ciphertext,nonce:_unb64(nonce),mac:Mac(_unb64(mac))),
+        keyVersion:keyVersion,senderDeviceId:senderDeviceId);
   }
 
   static Future<Map<String,dynamic>> decryptMessage(Map<String,dynamic> original) async {
     final m=Map<String,dynamic>.from(original);
     if (m['encryption_version'] != 1 || m['ciphertext']==null || m['encryption_nonce']==null) return m;
     try {
-      final key=await _loadConversationKey(
-        m['conversation_id'].toString(),
-        keyVersion:(m['key_version'] as num?)?.toInt() ?? 1,
-        senderDeviceId:m['sender_device_id']?.toString(),
-      );
-      if(key==null){m['body']='🔒 Encrypted message — key unavailable';return m;}
       final packed=jsonDecode(utf8.decode(_unb64(m['ciphertext'].toString()))) as Map<String,dynamic>;
       final box=SecretBox(_unb64(packed['c'].toString()),nonce:_unb64(m['encryption_nonce'].toString()),mac:Mac(_unb64(packed['m'].toString())));
-      m['body']=utf8.decode(await _aes.decrypt(box,secretKey:key));
+      m['body']=utf8.decode(await _decryptBox(m['conversation_id'].toString(),box,
+          keyVersion:(m['key_version'] as num?)?.toInt() ?? 1,
+          senderDeviceId:m['sender_device_id']?.toString()));
       m['_e2ee']=true;
     } catch (_) { m['body']='🔒 Unable to decrypt'; }
     return m;
